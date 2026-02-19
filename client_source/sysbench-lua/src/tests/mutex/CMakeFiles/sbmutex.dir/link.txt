@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsbmutex.a CMakeFiles/sbmutex.dir/sb_mutex.c.o
+/usr/bin/ranlib libsbmutex.a
