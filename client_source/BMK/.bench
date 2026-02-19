@@ -1,0 +1,71 @@
+#!/bin/bash
+#===================================================================================
+# Benchmark-kit config settings..
+#===================================================================================
+  BMK_HOME=${BMK_HOME:=/BMK}
+  export BMK_HOME
+
+#-----------------------------------------
+# Linux/x64 (default) or Linux/arm64
+#
+  EXT="x64"
+  ## EXT="arm64"
+
+#-----------------------------------------
+# MySQL connection
+#
+  user=dim
+  pass=dimitri
+  host=127.0.0.1
+  port=5400
+  socket=/apps/mysql8/data/mysql.sock
+  mysql=/apps/mysql8/bin/mysql
+  db=sysbench
+  TMP_DIR=/tmp
+
+# max connections for single Sysbench-1.1 process
+  sb11_MAX=20000
+
+#
+#-----------------------------------------
+# MySQL 8.0 Client and SSL Libs..
+#
+  # use openssl-1.1.1l
+  SSL=ssl111L
+
+  # set LD libs path accordingly
+  export LD_LIBRARY_PATH=$BMK_HOME/lib-$SSL-$EXT:$LD_LIBRARY_PATH
+
+#-----------------------------------------
+# Malloc..
+#
+  # mymalloc=/apps/lib/libjemalloc-5.2.1.so
+  # mymalloc=/apps/lib/libtcmalloc-4.4.5.so
+  # LD_PRELOAD=$mymalloc
+  # export LD_PRELOAD
+
+#-----------------------------------------
+# Sysbench-1.1 binary to use..
+#
+  # MySQL-8.0 dynamic client lib, SSL-1.1.1l
+  sb11=$BMK_HOME/sysbench-1.1-mysql80-$SSL-$EXT
+
+#
+#-----------------------------------------
+# Sizes..
+#
+  Size25K=25000
+  Size200K=200000
+  Size1M=1000000
+  Size10M=10000000
+  Size40M=40000000
+  Size50M=50000000
+  Size100M=100000000
+  Size400M=400000000
+  Size500M=500000000
+  Size800M=800000000
+  Size1000M=1000000000
+  Size4000M=4000000000
+  Size5000M=5000000000
+#
+#===================================================================================

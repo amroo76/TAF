@@ -1,0 +1,647 @@
+Usage: TAF command-line options and associated properties.
+
+  perl taf.pl [<options>]
+  perl taf.pl --properties-file=/path/user_properties_file.properties
+  perl taf.pl [<options>] --properties-file=/path/user_properties_file.properties
+
+Notes:
+* Command-line options override user and default properties files.
+* Test Suite properties may be overridden by including the properties
+  in your user properties file.
+* TAF's defaults file:
+      ./properties/default/taf_default.properties
+  It is strongly recommended to always use user properties files to override.
+* TAF runs off of action, command-line, and user properties files.
+
+{actions}
+
+    "archive-results"                              => "Archive leftover run data",
+    "generate-reports"                             => "Generate reports from sub-results",
+
+    "build-client"                                 => "Build test suite client",
+    "build-client-run-tests"                       => "Build client and run tests",
+
+    "install-init-db-exit"                         => "Install software, init DB, exit",
+    "install-init-start-db-exit"                   => "Install, init, start DB, exit",
+    "install-init-start-db-run-tests"              => "Install, init, start DB, run tests",
+    "install-init-start-db-build-client-run-tests" => "Install, init, start DB, build client, run tests",
+
+    "init-db-exit"                                 => "Init DB then exit",
+    "init-start-db-exit"                           => "Init and start DB then exit",
+    "init-start-db-run-tests"                      => "Init and start DB then run tests",
+    "init-start-db-build-client-run-tests"         => "Init and start DB, build client, run tests",
+
+    "run-tests"                                    => "Run tests against running DB",
+
+    "shutdown-db"                                  => "Shut down DB",
+    "shutdown-db-hard"                             => "Force shutdown DB",
+
+    "start-db-build-client-run-tests"              => "Start DB, build client, run tests",
+    "start-db-exit"                                => "Start DB only",
+    "start-db-run-tests"                           => "Start DB then run tests",
+
+
+Note: generate-reports
+   To regenerate report(s), copy the sub-results directories back into the
+   results directory. Then run the command line again with:
+       --action=generate-reports
+
+Note: setup-client
+   Some test suites (for example, sysbench-lua) require client binaries to be
+   built against the active database software before they can be executed.
+   Any action that includes "setup-client" will automatically invoke the test
+   suite's client build routine using the currently active database install.
+
+   In other cases (for example, hammerdbcli for the HammerDB test suite),
+   no compilation is required, but the test suite still depends on specific
+   client executables being present. In these cases, "setup-client" ensures
+   that the required client executable exists and is available for use before
+   test case execution begins.
+
+## Main TAF Driver ##
+
+   O = --action=<action>
+   P = taf.action=<action>
+
+{TAF Options}
+
+   O = --archive-host=<host>
+   P = taf.archive_host=<host>
+                   : Host where results are to be archived.
+                   : Default(localhost)
+
+   O = --archive-path=/path/to/archive/dir
+   P = taf.archive_path=/path/to/archive/dir
+                   : Directory where results are to be archived.
+                   : Default(taf/archive)
+
+   O = --bypass-user-verification-on-purges
+                   : Skip confirmation prompts for purge/delete operations.
+
+   O = --comments="comment"
+   P = taf.comments="comment"
+                   : Comment about the test (max 150 chars).
+                   : Default(null)
+
+   O = --compress-archive
+   P = taf.compress_archive={false/true}
+                   : Turn compression on for archived results.
+                   : Default(false)
+
+   O = --cmake-path=/path/to/cmake
+   P = taf.cmake_path=/path/to/cmake
+                   : Path to cmake (client builds).
+                   : Default(/usr/bin/cmake)
+
+   O = --do-test-setup-every-test
+   P = taf.do_test_setup_every_test={false/true}
+                   : Call TestSetup for every test.
+                   : Default(false)
+
+   O = --environment-variables=env;value,env;value,...
+   P = taf.environment_variables=env;value,env;value,...
+                   : System environment variables for TAF to set.
+
+   O = --exit-if-test-lock-exists
+   P = taf.exit_if_test_lock_exists={true/false}
+                   : Exit if TEST.LOCK exists.
+                   : Default(false)
+
+   O = --ignore-running-db-process
+   P = taf.ignore_running_db_process={true/false}
+                   : Skip checking for db process already running
+                   : Default(false)
+
+   O = --instances=<int>
+   P = taf.instances=<int>
+                   : Number of client sessions to spawn.
+                   : Default(0)
+
+   O = --generate-report
+   P = taf.generate_report={true/false}
+                   : Invoke report plugins at end of test.
+                   : Default(false)
+
+   O = --host=<host>
+   P = taf.host=<host>
+                   : Host script is running on.
+                   : Default(localhost)
+
+   O = --logs-dir=<path>
+   P = taf.logs_dir=<path>
+                   : Where to put logs.
+                   : Default(taf/logs)
+
+   O = --pass=<password>
+   P = taf.pass=<password>
+                   : Password for remote archive copy.
+                   : Default(null)
+
+   O = --properties-file=<path/filename>
+                   : User properties file path and name.
+
+   O = --report-plugin=<plugin.pm,...>
+   P = taf.report_plugin=<plugin.pm,...>
+                   : Report plugins to use.
+                   : Default(text.pm)
+
+   O = --reports-directory=<path>
+   P = taf.reports_directory=<path>
+                   : Directory where reports are written.
+                   : Default(null)
+
+   O = --results-root-dir=<path>
+   P = taf.results_root_dir=<path>
+                   : Root directory for results.
+                   : Default(automation_framework/results)
+
+   O = --sleep-after-test-setup=<seconds>
+   P = taf.sleep_after_test_setup=<seconds>
+                   : Sleep after test setup.
+                   : Default(0)
+
+   O = --sleep-after-test-run=<seconds>
+   P = taf.sleep_after_test_run=<seconds>
+                   : Sleep after test run.
+                   : Default(0)
+
+   O = --sleep-before-test-run=<seconds>
+   P = taf.sleep_before_test_run=<seconds>
+                   : Sleep before test run.
+                   : Default(0)
+
+   O = --skip-client-builds
+   P = taf.skip_client_builds={true/false}
+                   : Skip building client executables.
+                   : Default(false)
+
+   O = --skip-test-cleanup
+   P = taf.skip_test_cleanup={true/false}
+                   : Skip TestCleanup.
+                   : Default(false)
+
+   O = --skip-test-post
+   P = taf.skip_test_post={true/false}
+                   : Skip TestPost.
+                   : Default(false)
+
+   O = --skip-test-setup
+   P = taf.skip_test_setup={true/false}
+                   : Skip TestSetup.
+                   : Default(false)
+
+   O = --skip-test-suite-cleanup
+   P = taf.skip_test_suite_cleanup={true/false}
+                   : Skip TestSuiteCleanup.
+                   : Default(false)
+
+   O = --test-type=<type>
+   P = taf.test_type=<type>
+                   : Type of testing being done.
+                   : Default(adhoc)
+
+   O = --tmp-dir=<temp-dir-path>
+   P = taf.tmp_dir=<temp-dir-path>
+                   : Temp directory for TAF.
+                   : Default(./tmp)
+
+   O = --user=<user>
+   P = taf.user=<user>
+                   : Username for remote archive copy.
+                   : Default(null)
+
+   O = --warmup-threads=<int>
+   P = taf.warmup_threads=<int>
+                   : Warmup threads for supported suites.
+                   : Default(1)
+
+   O = --warmup-duration=<seconds>
+   P = taf.warmup_duration=<seconds>
+                   : Warmup duration.
+                   : Default(null)
+
+{Test Specific Args}
+
+   O = --duration=<seconds|min>
+   P = taf.duration=<seconds|min>
+       : How long to run each test.
+       : Seconds vs. minutes depends entirely on the test suite implementation.
+       : Example: Sysbench uses seconds, HammerDB TPROC-C uses minutes.
+       : Default: 30
+
+   O = --iterations=<number>
+   P = taf.iterations=<number>
+                   : Number of iterations for each thread count.
+                   : Default(1)
+
+   O = --tests="test1,test2"
+   P = taf.tests="test1,test2"
+                   : Run only specific tests.
+
+   O = --test-suite=<suite>
+   P = taf.test_suite=<suite>
+                   : Test suite to run.
+                   : Default(template)
+
+   O = --test-suite-properties=key=value,...
+   P = taf.test_suite_properties=key=value,...
+                   : Override test suite properties.
+
+   O = --threads=1,2,...4096
+   P = taf.threads=1,2,...4096
+                   : List of threads to ask test suite to run.
+
+   O = --use-request-based
+   P = taf.use_request_based={true/false}
+                   : Convert duration into request count.
+                   : Default(false)
+
+    O = --exec-sql-file-before-test-setup=<path/to/sql/file>
+    P = taf.exec_sql_file_before_test_setup=<path/to/sql/file>
+                   : Execute SQL file before TestSetup is invoked.
+                   : Output is written to the first sub-results directory.
+                   : Default(null)
+
+    O = --exec-sql-file-after-test-setup=<path/to/sql/file>
+    P = taf.exec_sql_file_after_test_setup=<path/to/sql/file>
+                   : Execute SQL file after TestSetup completes and before TestRun begins.
+                   : Output is written to the first sub-results directory.
+                   : Default(null)
+
+    O = --exec-sql-file-before-run-iter=<path/to/sql/file>
+    P = taf.exec_sql_file_before_run_iter=<path/to/sql/file>
+                   : Execute SQL file before each test iteration begins.
+                   : Output is written to the current iteration's sub-results directory.
+                   : Default(null)
+
+    O = --exec-sql-file-after-run-iter=<path/to/sql/file>
+    P = taf.exec_sql_file_after_run_iter=<path/to/sql/file>
+                   : Execute SQL file after each test iteration completes.
+                   : Output is written to the current iteration's sub-results directory.
+                   : Default(null)
+
+{Database}
+
+   O = --taf-db-makers-plugin=<maker>
+   P = taf.taf_db_makers_plugin=<maker>
+                   : TAF database maker plugin to load.
+                   : Selects the lifecycle implementation for the database
+                   : software maker (mariadb, mysql, to be added).
+                   : This option controls which TAF plugin is instantiated
+                   : to perform install, init, start, stop, and validation
+                   : operations for the selected database maker.
+                   :
+                   : If unset (null):
+                   :   The Active Install Manager automatically assigns the
+                   :   maker of the currently active database software install.
+                   :   See "Active Install Marker" below.
+                   :
+                   : Default(null)
+
+   O = --database=<name>
+   P = taf.database=<name>
+                   : Database name to create and use for tests.
+                   : Default(test)
+
+   O = --db-config-file=<path>
+   P = taf.db_config_file=<path>
+                   : Path to the database configuration file.
+                   : If this file contains any SSL-related directives,
+                   : TAF terminates immediately before logging or suite
+                   : preparation. All SSL configuration must be provided
+                   : through TAF options only.
+
+   O = --db-data-dir=<path>
+   P = taf.db_data_dir=<path>
+                   : Database data directory.
+
+   O = --db-engine=<engine>
+   P = taf.db_engine=<engine>
+                   : Storage engine for test database.
+                   : Default(innodb)
+
+   O = --db-extra-args=<args>
+   P = taf.db_extra_args=<args>
+                   : Extra arguments passed to the database server on startup.
+
+   O = --db-plugin-dir=<path>
+   P = taf.db_plugin_dir=<path>
+                   : Database plugin to load (mariadb, mysql, postgres, etc).
+
+   O = --db-port=<port>
+   P = taf.db_port=<port>
+                   : TCP port for database connections.
+                   : Default(3306)
+
+   O = --db-socket=<path>
+   P = taf.db_socket=<path>
+                   : Unix socket file for database connections.
+
+   O = --db-clients-use-unix-socket
+   P = taf.db_clients_use_unix_socket=<true|false>
+                   : When true, all test clients connect using the Unix socket.
+                   : When false, clients connect using TCP via db_port.
+                   : Default(false)
+
+   O = --db-root-user=<user>
+   P = taf.db_root_user=<user>
+                   : Administrative user for database setup.
+                   : Default(root)
+
+   O = --db-root-pass=<password>
+   P = taf.db_root_pass=<password>
+                   : Password for root user.
+
+   O = --db-user=<user>
+   P = taf.db_user=<user>
+                   : Test user created during initialization.
+                   : Default(mariadb_tester)
+
+   O = --db-user-pass=<password>
+   P = taf.db_user_pass=<password>
+                   : Password for test user.
+
+   O = --db-user-permissions=<perms>
+   P = taf.db_user_permissions=<perms>
+                   : Comma-delimited permissions granted to test user.
+
+   ---------------------------------------------------------------------------
+   SSL Configuration (TAF is the single source of truth)
+   ---------------------------------------------------------------------------
+
+   O = --db-ssl-mode=<mode>
+   P = taf.db_ssl_mode=<mode>
+                   : SSL mode for all database connections.
+                   : off | prefer | require | verify_ca | verify_identity
+                   : Default(off)
+
+   O = --db-ssl-ca=<path>
+   P = taf.db_ssl_ca=<path>
+                   : Path to CA certificate file.
+
+   O = --db-ssl-cert=<path>
+   P = taf.db_ssl_cert=<path>
+                   : Path to client certificate file.
+
+   O = --db-ssl-key=<path>
+   P = taf.db_ssl_key=<path>
+                   : Path to client private key file.
+
+   O = --db-ssl-crl=<path>
+   P = taf.db_ssl_crl=<path>
+                   : Path to certificate revocation list (optional).
+
+   O = --db-ssl-cipher=<list>
+   P = taf.db_ssl_cipher=<list>
+                   : Cipher list for SSL connections (optional).
+
+   O = --db-use-native-for-passwords
+   P = taf.db_use_native_for_passwords=<false/true>
+                   : Enable mysql_native_password for database users.
+                   : Default(false)
+                   :
+                   : Behavior:
+                   :   MariaDB:
+                   :       - Fully supported. Plugin is always available.
+                   :
+                   :   MySQL 8.0.x:
+                   :       - Supported automatically. Plugin loads by default.
+                   :
+                   :   MySQL 8.4.x:
+                   :       - Supported only when explicitly loaded at server
+                   :         start (e.g., --plugin-load-add=mysql_native_password).
+                   :
+                   :   MySQL 9.0+:
+                   :       - Not supported. Plugin removed from the server.
+                   :
+                   : Notes:
+                   :   - This property controls authentication behavior only.
+                   :   - It does not modify server configuration files.
+
+   ---------------------------------------------------------------------------
+   SSL Enforcement Rules
+   ---------------------------------------------------------------------------
+
+   * All SSL configuration must be provided through TAF options only.
+   * If the database config file contains any SSL-related directives,
+     TAF terminates immediately via QuickExit before logging begins.
+   * SSL normalization and validation occur during install resolution.
+   * Database plugins, SQL libraries, and test suites consume the
+     normalized SSL contract and must not override it.
+
+{Database Software}
+
+Note: Active Install Marker
+   TAF maintains a small marker file that records which database software
+   installation is currently considered "active". This marker allows TAF to
+   consistently determine which installation should be used for actions such as
+   setup-client, setup-db, start-db, and run-tests.
+
+   The active install marker is updated automatically when:
+       - A new installation is performed using --db-software-install-packages
+       - The user explicitly selects an install using:
+             --set-active-database-software-install
+       - The user specifies an existing install using:
+             --db-software-install-dir=<path>
+         (Selecting an install directory implicitly makes it the active install.)
+
+   The marker is stored in the TAF working directory as a small text file
+   (for example, .taf-active-install.txt) containing the name of the active
+   installation directory.
+
+   This allows TAF to provide the following capabilities:
+
+       - Test suites can reliably locate the correct database binaries.
+       - Client build routines (for example, sysbench-lua) can compile against
+         the correct installation without requiring user input.
+       - Suites that depend on pre-existing executables (for example, hammerdbcli
+         for the HammerDB test suite) can verify that the required client
+         executable exists under the active install.
+       - Actions such as setup-client, setup-db, start-db, and run-tests always
+         operate against the same, explicitly selected installation.
+
+   To view the currently active installation, use:
+       --list-active-db-install
+
+   To change the active installation, use:
+       --set-active-database-software-install
+
+   O = --db-software-install-packages=/path/pkg1.tar.gz[,pkg2.rpm,...],*
+   P = taf.db_software_install_packages=...
+                   : Packages to install.
+
+   O = --db-software-install-dir=<path>
+   P = taf.db_software_install_dir=<path>
+                   : Directory of an existing database software install.
+                   : Using this option also updates the active install marker,
+                     making the specified directory the active installation
+                     for all subsequent TAF actions (setup-client, setup-db,
+                     start-db, run-tests, etc.).
+
+   O = --db-software-install-root-dir=<path>
+   P = taf.db_software_install_root_dir=<path>
+                   : Root directory for installs.
+
+   O = --remove-database-software-install
+                   : Given a choice of which installs to remove.
+
+   O = --remove-all-database-software-install
+                   : Removes all database software that has been installed by taf
+                   : Clears active install marker
+                   : See: (above)
+                   : --bypass-user-verification-on-purges 
+
+   O = --set-active-database-software-install
+                   : Mark a database software install as active.
+
+   O = --list-database-software-installs
+                   : List all known database software installs.
+
+   O = --list-active-db-install
+                   : Show the active database software install.
+
+   O = --db-software-install
+                   : Perform a direct database software install without
+                     requiring a properties file or TAF action.
+
+             Requires:
+              --db-software-install-packages=/path/pkg1.rpm[,pkg2.rpm,...]
+
+   O = --db-software-update-install
+                   : Trigger the database software update workflow.
+
+                     This action requires:
+                       --db-software-install-packages=/path/pkg1.tar.gz[,pkg2.rpm,...]
+
+                     Behavior:
+                       * Prompts the user to select which existing install to update.
+                       * Stages and validates the provided packages.
+                       * Ensures vendor match with the target install.
+                       * Applies the update using merge-safe logic.
+                       * Does NOT change the active install marker.
+
+                     Notes:
+                       * If staging fails (bad packages, vendor mismatch, etc.), the user
+                         is returned to the selection menu.
+                       * If the user exits selection, no update is applied.
+
+{DB Process Rest Watch}
+
+   O = --db-process-rest-enable
+   P = taf.db_process_rest_enable=<bool>
+                   : Enable CPU-based rest detection for the database
+                   : process. When enabled, TAF waits for the DB process
+                   : to reach a stable rest state before continuing.
+                   : Default(false)
+
+   O = --db-process-rest-low=<percent>
+   P = taf.db_process_rest_low=<percent>
+                   : CPU percent considered "at rest". Samples at or
+                   : below this value count toward the required number
+                   : of consecutive rest samples.
+                   : Default(5)
+
+   O = --db-process-rest-high=<percent>
+   P = taf.db_process_rest_high=<percent>
+                   : CPU percent that forces a reset of the rest counter.
+                   : Samples at or above this value indicate the process
+                   : is still active.
+                   : Default(20)
+
+   O = --db-process-rest-consecutive=<count>
+   P = taf.db_process_rest_consecutive=<count>
+                   : Number of consecutive "at rest" samples required
+                   : before the DB process is considered fully idle.
+                   : Default(10)
+
+   O = --db-process-rest-max-attempts=<count>
+   P = taf.db_process_rest_max_attempts=<count>
+                   : Maximum number of sampling cycles before giving up
+                   : and reporting that the DB process did not reach a
+                   : rest state.
+                   : Default(200)
+
+   O = --db-process-rest-interval=<seconds>
+   P = taf.db_process_rest_interval=<seconds>
+                   : Seconds to sleep between sampling cycles. This is
+                   : in addition to the 1-second CPU sampling window.
+                   : Default(2)
+
+   O = --db-process-rest-verbose
+   P = taf.db_process_rest_verbose=<bool>
+                   : Enable verbose diagnostic snapshots during rest
+                   : detection. Intended for troubleshooting only.
+                   : Default(false)
+
+{Directory Maintenance}
+
+   O = --purge-archive
+                   : Purge archive directory based on retention policy.
+                   :  --archive-days-to=keep=(number of days) (default = 7)
+                   : See: (above)
+                   : --bypass-user-verification-on-purges 
+
+   O = --purge-data-directory
+                   : Remove all contents of the data directory.
+                   : See: (above)
+                   : --bypass-user-verification-on-purges 
+
+   O = --purge-results-directory
+                   : Remove all contents of the results directory.
+                   : See: (above)
+                   : --bypass-user-verification-on-purges 
+
+   O = --purge-reports-directory
+                   : Remove all contents of the reports directory.
+                   : See: (above)
+                   : --bypass-user-verification-on-purges 
+
+   O = --purge-tmp-directory
+                   : Remove all contents of the tmp directory.
+                   : See: (above)
+                   : --bypass-user-verification-on-purges 
+
+   O = --purge-all-taf-main-directories
+                   : Purge data, results, reports, and tmp directories.
+                   : See --bypass-user-verification-on-purges above
+
+{Misc}
+
+   O = --tools-debug
+   P = taf.tools_debug={false/true}
+                   : Enable debug output.
+                   : Default(false)
+
+   O = --help
+                   : Print this usage.
+
+   O = --list-actions
+                   : Print all supported actions.
+
+   O = --list-test-suites
+                   : List installed Test Suite modules.
+
+   O = --list-test-suites-tests
+                   : List default and legal tests for suites.
+
+   O = --list-test-suites-help
+                   : Print HELP from Test Suite modules.
+
+   O = --list-test-types
+                   : List available test types.
+
+   O = --version
+                   : Print TAF version information.
+
+{EXIT CODES}
+
+  Normal Exit   = 0
+  Script Error  = 1
+  Script Killed = 2
+
+---------------------------------------------------------------------------
+TAF - Test Automation Framework
+Copyright (c) 2025-2026 MariaDB Foundation
+Licensed under the GNU General Public License, version 2 or later (GPLv2+)
+See https://www.gnu.org/licenses/ for license details.
+---------------------------------------------------------------------------

@@ -1,0 +1,708 @@
+-- Copyright (C) 2018-2024 Oracle Corp.
+-- remastered and adapted for BMK-kit by Dimitri KRAVTCHUK <dimitri.kravtchuk@oracle.com>
+-- BMK-kit howto : http://dimitrik.free.fr/blog/posts/mysql-perf-bmk-kit.html
+
+-- Copyright (C) 2006-2017 Vadim Tkachenko, Percona
+
+-- This program is free software; you can redistribute it and/or modify
+-- it under the terms of the GNU General Public License as published by
+-- the Free Software Foundation; either version 2 of the License, or
+-- (at your option) any later version.
+
+-- This program is distributed in the hope that it will be useful,
+-- but WITHOUT ANY WARRANTY; without even the implied warranty of
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-- GNU General Public License for more details.
+
+-- You should have received a copy of the GNU General Public License
+-- along with this program; if not, write to the Free Software
+-- Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+
+-- -----------------------------------------------------------------------------
+-- Common code for TPCC benchmarks.
+-- -----------------------------------------------------------------------------
+
+require( "mysql_common" )
+
+
+function init()
+   assert(event ~= nil,
+          "this script is meant to be included by other TPCC scripts and " ..
+             "should not be called directly.")
+end
+
+if sysbench.cmdline.command == nil then
+   error("Command is required. Supported commands: create, prepare, run, cleanup, help")
+end
+
+-- >>: TPCC defaults..
+MAXITEMS=100000
+DIST_PER_WARE=10
+CUST_PER_DIST=3000
+
+-- >>: Command line options
+sysbench.cmdline.options = {
+  scale =
+    {"Scale factor (warehouses)", 100},
+  tables =
+    {"Number of tables", 1},
+  verbose =
+    {"print more verbose/debug messages during data load", 0},
+  trx_debug =
+    {"debug mode - Execute only one from 5 transactions (--trx_debug=[1-5]), (def:0 (off))", 0},
+  use_fk =
+    {"Use foreign keys -- 0:no but sec.idx, 1:yes+sec.idx, 2:none (def:1)", 1},
+  for_update =
+    {"Use FOR UPDATE -- 0:no, 1:yes, 2:enforced (def:1)", 1},
+  force_primary =
+    {"Force PRIMARY INDEX in some queries -- 0:no, 1:yes (def:0)", 0},
+  force_null =
+    {"Force NULL for some values to follow original TPCC -- 0:no, 1:yes (def:0)", 0},
+  trx_level =
+    {"Transaction isolation level (RC, RR or SER)", "RR"},
+  trx_retry =
+    { "Retry to replay the same transaction again in case of ROLLBACK/DEDALOCK (def:off)", false },
+  sync_file =
+    { "Filename to use for all treads start synchronization (full path filename)", "" },
+  sync_wait =
+    { "Spin waits time in file synchronization loops (ms)", 10 },
+  mysql_storage_engine =
+    {"Storage engine, if MySQL is used", "innodb"},
+  mysql_table_options =
+    {"Extra table options, e.g. 'COLLATE latin1_bin'", ""},
+  mysql_check_charset  =
+    { "Check current MySQL connection charset settings (def:false)", false },
+  mysql_session_options =
+    {"Extra session options, e.g. 'SET SESSION sort_buffer_size = 1000000;'", ""},
+  mysql_table_compression  =
+    { "Extra table transparent compression option, ex.: 'lz4'", "" },
+  opt_debug =
+    { "enable Sysbench options debug output on test starting.. (def:off)", false }
+}
+
+
+-- Create tables..
+function cmd_create()
+  local i
+
+  if( sysbench.tid ~= 0 ) then
+    return
+  end
+
+  local drv = sysbench.sql.driver()
+  local con = drv:connect()
+
+  con:query("SET FOREIGN_KEY_CHECKS=0")
+
+  -- >>: mysql session options..
+  mysql_session_opt( con )
+
+  for i = 1, sysbench.opt.tables  do
+    create_tables( drv, con, i )
+  end
+end
+
+
+-- Create the tables and Prepare the dataset. This command supports parallel execution, i.e. will
+-- benefit from executing with --threads > 1 as long as --scale > 1
+function cmd_prepare()
+  local wid, prev_wid, save_wid
+  local drv = sysbench.sql.driver()
+  local con = drv:connect()
+
+  con:query("SET FOREIGN_KEY_CHECKS=0")
+
+  -- >>: mysql session options..
+  mysql_session_opt( con )
+
+  -- hack: (dim) bug ??
+  -- for i = sysbench.tid % sysbench.opt.threads + 1, sysbench.opt.scale, sysbench.opt.threads do
+  -- for wid = sysbench.tid + 1, sysbench.opt.scale, sysbench.opt.threads do
+  -- for wid = sysbench.tid + 1, sysbench.opt.scale do
+  wid = sysbench.tid + 1
+  save_wid = 0
+  prev_wid = 0
+
+  while true do
+    if( wid > sysbench.opt.scale ) then
+      break
+    end
+
+    if( sysbench.opt.verbose == 1 ) then
+      print( string.format( "==> tid-%03d wid saved: %3d prev: %3d curr: %3d",
+        sysbench.tid, save_wid, prev_wid, wid ))
+    end
+
+    save_wid = wid
+    load_tables( drv, con, wid )
+    prev_wid = wid
+
+    -- print( string.format( "curr wid: %3d  next wid: %3d", wid, wid + sysbench.opt.threads ))
+    wid = wid + sysbench.opt.threads
+
+    -- print( string.format( "new  wid: %3d", wid ))
+  end
+end
+
+
+-- Check consistency
+-- benefit from executing with --threads > 1 as long as --scale > 1
+function cmd_check()
+  local drv = sysbench.sql.driver()
+  local con = drv:connect()
+  local i
+
+  for i = sysbench.tid % sysbench.opt.threads + 1, sysbench.opt.scale,
+    sysbench.opt.threads do
+    check_tables(drv, con, i)
+  end
+end
+
+
+-- Implement parallel prepare and prewarm commands
+sysbench.cmdline.commands = {
+  create = {cmd_create, sysbench.cmdline.PARALLEL_COMMAND},
+  prepare = {cmd_prepare, sysbench.cmdline.PARALLEL_COMMAND},
+  check = {cmd_check, sysbench.cmdline.PARALLEL_COMMAND}
+}
+
+
+function create_tables( drv, con, table_num )
+  local extra_table_options = ""
+  local engine_def = ""
+  local query
+
+  if( drv:name() == "mysql" or drv:name() == "attachsql" or drv:name() == "drizzle" ) then
+    engine_def = "/*! ENGINE = " .. sysbench.opt.mysql_storage_engine .. " */"
+    extra_table_options = sysbench.opt.mysql_table_options or ""
+  end
+
+  if( string.len( sysbench.opt.mysql_table_compression ) > 0 ) then
+    extra_table_options = extra_table_options .. " compression='" .. sysbench.opt.mysql_table_compression .. "' "
+  end
+
+  print( string.format( "Creating tables: %d", table_num ))
+
+  -- >>: WAREHOUSE table
+  query = string.format([[
+    CREATE TABLE IF NOT EXISTS warehouse%d (
+    w_id smallint not null,
+    w_name varchar(10),
+    w_street_1 varchar(20),
+    w_street_2 varchar(20),
+    w_city varchar(20),
+    w_state char(2),
+    w_zip char(9),
+    w_tax decimal(4,2),
+    w_ytd decimal(12,2),
+    PRIMARY KEY(w_id)
+    ) %s %s]],
+    table_num, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  -- >>: DISTRICT table
+  query = string.format([[
+    create table IF NOT EXISTS district%d (
+    d_id tinyint not null,
+    d_w_id smallint not null,
+    d_name varchar(10),
+    d_street_1 varchar(20),
+    d_street_2 varchar(20),
+    d_city varchar(20),
+    d_state char(2),
+    d_zip char(9),
+    d_tax decimal(4,2),
+    d_ytd decimal(12,2),
+    d_next_o_id int,
+    PRIMARY KEY(d_w_id, d_id)
+    ) %s %s]],
+    table_num, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  -- >>: CUSTOMER TABLE
+  query = string.format([[
+    create table IF NOT EXISTS customer%d (
+    c_id int not null,
+    c_d_id tinyint not null,
+    c_w_id smallint not null,
+    c_first varchar(16),
+    c_middle char(2),
+    c_last varchar(16),
+    c_street_1 varchar(20),
+    c_street_2 varchar(20),
+    c_city varchar(20),
+    c_state char(2),
+    c_zip char(9),
+    c_phone char(16),
+    c_since datetime,
+    c_credit char(2),
+    c_credit_lim bigint,
+    c_discount decimal(4,2),
+    c_balance decimal(12,2),
+    c_ytd_payment decimal(12,2),
+    c_payment_cnt smallint,
+    c_delivery_cnt smallint,
+    c_data text,
+    PRIMARY KEY(c_w_id, c_d_id, c_id)
+    ) %s %s]],
+    table_num, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  -- >>: HISTORY TABLE
+  query = string.format([[
+    create table IF NOT EXISTS history%d (
+    h_id bigint unsigned not null auto_increment,
+    h_c_id int,
+    h_c_d_id tinyint,
+    h_c_w_id smallint,
+    h_d_id tinyint,
+    h_w_id smallint,
+    h_date datetime,
+    h_amount decimal(6,2),
+    h_data varchar(24),
+    PRIMARY KEY(h_id)
+    ) %s %s]],
+    table_num, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  -- >>: ORDERS table
+  -- hack: (dim) set DEFAULT o_carrier_id value
+  query = string.format([[
+    create table IF NOT EXISTS orders%d (
+    o_id int not null,
+    o_d_id tinyint not null,
+    o_w_id smallint not null,
+    o_c_id int,
+    o_entry_d datetime,
+    o_carrier_id tinyint DEFAULT -1,
+    o_ol_cnt tinyint,
+    o_all_local tinyint,
+    PRIMARY KEY(o_w_id, o_d_id, o_id)
+    ) %s %s]],
+    table_num, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  -- >>: NEW_ORDERS table
+  query = string.format([[
+    create table IF NOT EXISTS new_orders%d (
+    no_o_id int not null,
+    no_d_id tinyint not null,
+    no_w_id smallint not null,
+    PRIMARY KEY(no_w_id, no_d_id, no_o_id)
+    ) %s %s]],
+    table_num, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  -- >>: ORDER_LINE table
+  -- hack: (dim) set DEFAULT for ol_delivery_d
+  query = string.format([[
+    create table IF NOT EXISTS order_line%d (
+    ol_o_id int not null,
+    ol_d_id tinyint not null,
+    ol_w_id smallint not null,
+    ol_number tinyint not null,
+    ol_i_id int,
+    ol_supply_w_id smallint,
+    ol_delivery_d datetime DEFAULT '1900-01-01',
+    ol_quantity tinyint,
+    ol_amount decimal(6,2),
+    ol_dist_info char(24),
+    PRIMARY KEY(ol_w_id, ol_d_id, ol_o_id, ol_number)
+    ) %s %s]],
+    table_num, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  -- >>: STOCK table
+  query = string.format([[
+    create table IF NOT EXISTS stock%d (
+    s_i_id int not null,
+    s_w_id smallint not null,
+    s_quantity smallint,
+    s_dist_01 char(24),
+    s_dist_02 char(24),
+    s_dist_03 char(24),
+    s_dist_04 char(24),
+    s_dist_05 char(24),
+    s_dist_06 char(24),
+    s_dist_07 char(24),
+    s_dist_08 char(24),
+    s_dist_09 char(24),
+    s_dist_10 char(24),
+    s_ytd decimal(8,0),
+    s_order_cnt smallint,
+    s_remote_cnt smallint,
+    s_data varchar(50),
+    PRIMARY KEY(s_w_id, s_i_id)
+    ) %s %s]],
+    table_num, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  local i = table_num
+
+  -- note: ITEM table
+  query = string.format([[
+    create table IF NOT EXISTS item%d (
+    i_id int not null,
+    i_im_id int,
+    i_name varchar(24),
+    i_price decimal(5,2),
+    i_data varchar(50),
+    PRIMARY KEY(i_id)
+    ) %s %s]],
+    i, engine_def, extra_table_options
+  )
+  con:query(query)
+
+  con:bulk_insert_init("INSERT INTO item" .. i .." (i_id, i_im_id, i_name, i_price, i_data) values")
+  for j = 1 , MAXITEMS do
+    local i_im_id = sysbench.rand.uniform(1,10000)
+    local i_price = sysbench.rand.uniform_double()*100+1
+    -- i_name is not generated as prescribed by standard, but we want to provide a better compression
+    local i_name  = string.format("item-%d-%f-%s", i_im_id, i_price, sysbench.rand.string("@@@@@"))
+    local i_data  = string.format("data-%s-%s", i_name, sysbench.rand.string("@@@@@"))
+
+    query = string.format([[(%d,%d,'%s',%f,'%s')]],
+      j, i_im_id, i_name:sub(1,24), i_price, i_data:sub(1,50))
+    con:bulk_insert_next(query)
+  end
+  con:bulk_insert_done()
+
+  print(string.format("Adding indexes %d ... ", i))
+  con:query("CREATE INDEX idx_customer ON customer"..i.." (c_w_id,c_d_id,c_last,c_first)")
+  con:query("CREATE INDEX idx_orders ON orders"..i.." (o_w_id,o_d_id,o_c_id,o_id)")
+
+  -- NOTE: use_fk=2 -- nor FK nor sec.idx !
+  if sysbench.opt.use_fk <= 1
+  then
+    print(string.format("Adding FK indexes %d ... ", i))
+    con:query("CREATE INDEX fkey_stock_2 ON stock"..i.." (s_i_id)")
+    con:query("CREATE INDEX fkey_order_line_2 ON order_line"..i.." (ol_supply_w_id,ol_i_id)")
+    con:query("CREATE INDEX fkey_history_1 ON history"..i.." (h_c_w_id,h_c_d_id,h_c_id)")
+    con:query("CREATE INDEX fkey_history_2 ON history"..i.." (h_w_id,h_d_id )")
+  end
+
+  if sysbench.opt.use_fk == 1
+  then
+    print(string.format("Adding FK %d ... ", i))
+    con:query("ALTER TABLE new_orders"..i.." ADD CONSTRAINT fkey_new_orders_1_"..table_num.." FOREIGN KEY(no_w_id,no_d_id,no_o_id) REFERENCES orders"..i.."(o_w_id,o_d_id,o_id)")
+    con:query("ALTER TABLE orders"..i.." ADD CONSTRAINT fkey_orders_1_"..table_num.." FOREIGN KEY(o_w_id,o_d_id,o_c_id) REFERENCES customer"..i.."(c_w_id,c_d_id,c_id)")
+    con:query("ALTER TABLE customer"..i.." ADD CONSTRAINT fkey_customer_1_"..table_num.." FOREIGN KEY(c_w_id,c_d_id) REFERENCES district"..i.."(d_w_id,d_id)")
+    con:query("ALTER TABLE history"..i.." ADD CONSTRAINT fkey_history_1_"..table_num.." FOREIGN KEY(h_c_w_id,h_c_d_id,h_c_id) REFERENCES customer"..i.."(c_w_id,c_d_id,c_id)")
+    con:query("ALTER TABLE history"..i.." ADD CONSTRAINT fkey_history_2_"..table_num.." FOREIGN KEY(h_w_id,h_d_id) REFERENCES district"..i.."(d_w_id,d_id)")
+    con:query("ALTER TABLE district"..i.." ADD CONSTRAINT fkey_district_1_"..table_num.." FOREIGN KEY(d_w_id) REFERENCES warehouse"..i.."(w_id)")
+    con:query("ALTER TABLE order_line"..i.." ADD CONSTRAINT fkey_order_line_1_"..table_num.." FOREIGN KEY(ol_w_id,ol_d_id,ol_o_id) REFERENCES orders"..i.."(o_w_id,o_d_id,o_id)")
+    con:query("ALTER TABLE order_line"..i.." ADD CONSTRAINT fkey_order_line_2_"..table_num.." FOREIGN KEY(ol_supply_w_id,ol_i_id) REFERENCES stock"..i.."(s_w_id,s_i_id)")
+    con:query("ALTER TABLE stock"..i.." ADD CONSTRAINT fkey_stock_1_"..table_num.." FOREIGN KEY(s_w_id) REFERENCES warehouse"..i.."(w_id)")
+    con:query("ALTER TABLE stock"..i.." ADD CONSTRAINT fkey_stock_2_"..table_num.." FOREIGN KEY(s_i_id) REFERENCES item"..i.."(i_id)")
+  end
+end
+
+
+function set_isolation_level( drv, con )
+  if( drv:name() == "mysql" ) then
+    if( sysbench.opt.trx_level == "RR" ) then
+      isolation_level="REPEATABLE-READ"
+    elseif( sysbench.opt.trx_level == "RC" ) then
+      isolation_level="READ-COMMITTED"
+    elseif( sysbench.opt.trx_level == "SER" ) then
+      isolation_level="SERIALIZABLE"
+    end
+
+    rs=con:query("SHOW VARIABLES LIKE 't%_isolation'")
+    row = rs:fetch_row()
+    isolation_variable = row[1]
+
+    con:query("SET SESSION " .. isolation_variable .. "='".. isolation_level .."'")
+  end
+end
+
+
+function load_tables( drv, con, wid )
+  local null_value = "DEFAULT"
+  local query, d_id, c_id, o_id, ol_id, s_id, table_num, range
+
+  if( sysbench.opt.force_null == 1 ) then
+    null_value= "NULL"
+  end
+
+  set_isolation_level( drv, con )
+  range = sysbench.opt.scale/10
+
+  -- print(string.format("Creating warehouse: %d", wid))
+
+  for table_num = 1, sysbench.opt.tables do
+    if( sysbench.opt.verbose == 1 ) then
+      print( string.format( "THD-%03d> loading tables: %3d for warehouse: %5d | null_value: %s",
+        sysbench.tid, table_num, wid, null_value ))
+    elseif( wid % range == 1 ) then
+      print( string.format( "loading tables: %3d for warehouses: %5d ... + %d | null_value: %s",
+      table_num, wid, range, null_value ))
+    end
+
+    con:bulk_insert_init( "INSERT INTO warehouse" .. table_num ..
+      " (w_id, w_name, w_street_1, w_street_2, w_city, w_state, w_zip, w_tax, w_ytd) values")
+
+    query = string.format([[(%d, '%s','%s','%s', '%s', '%s', '%s', %f,300000)]],
+      wid, sysbench.rand.string("name-@@@@@"), sysbench.rand.string("street1-@@@@@@@@@@"),
+      sysbench.rand.string("street2-@@@@@@@@@@"), sysbench.rand.string("city-@@@@@@@@@@"),
+      sysbench.rand.string("@@"),sysbench.rand.string("zip-#####"),sysbench.rand.uniform_double()*0.2
+    )
+
+    con:bulk_insert_next(query)
+    con:bulk_insert_done()
+
+    con:bulk_insert_init("INSERT INTO district" .. table_num ..
+     " (d_id, d_w_id, d_name, d_street_1, d_street_2, d_city, d_state, d_zip, d_tax, d_ytd, d_next_o_id) values")
+
+    for d_id = 1, DIST_PER_WARE do
+      query = string.format([[(%d, %d, '%s','%s','%s', '%s', '%s', '%s', %f,30000,3001)]],
+        d_id, wid, sysbench.rand.string("name-@@@@@"), sysbench.rand.string("street1-@@@@@@@@@@"),
+        sysbench.rand.string("street2-@@@@@@@@@@"), sysbench.rand.string("city-@@@@@@@@@@"),
+        sysbench.rand.string("@@"),sysbench.rand.string("zip-#####"),sysbench.rand.uniform_double()*0.2
+      )
+
+      con:bulk_insert_next(query)
+    end
+    con:bulk_insert_done()
+
+    -- >>: CUSTOMER
+    con:bulk_insert_init("INSERT INTO customer" .. table_num .. [[
+      (c_id, c_d_id, c_w_id, c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip,
+      c_phone, c_since, c_credit, c_credit_lim, c_discount, c_balance, c_ytd_payment, c_payment_cnt, c_delivery_cnt, c_data) values]])
+
+    for d_id = 1, DIST_PER_WARE do
+      for c_id = 1, CUST_PER_DIST do
+        local c_last
+
+        if( c_id <= 1000 ) then
+          c_last = Lastname( c_id - 1 )
+        else
+          c_last = Lastname( NURand( 255, 0, 999 ) )
+        end
+
+        query = string.format([[(%d, %d, %d, '%s','OE','%s','%s', '%s', '%s', '%s', '%s','%s',NOW(),'%s',50000,%f,-10,10,1,0,'%s' )]],
+          c_id, d_id, wid,
+          sysbench.rand.string("first-"..string.rep("@",sysbench.rand.uniform(2,10))),
+          c_last,
+          sysbench.rand.string("street1-@@@@@@@@@@"),
+          sysbench.rand.string("street2-@@@@@@@@@@"), sysbench.rand.string("city-@@@@@@@@@@"),
+          sysbench.rand.string("@@"),sysbench.rand.string("zip-#####"),
+          sysbench.rand.string(string.rep("#",16)),
+          (sysbench.rand.uniform(1,100) > 10) and "GC" or "BC",
+          sysbench.rand.uniform_double()*0.5,
+          string.rep(sysbench.rand.string("@"),sysbench.rand.uniform(300,500))
+        )
+        con:bulk_insert_next(query)
+
+      end
+    end
+
+    con:bulk_insert_done()
+
+    -- >>: HISTORY
+    con:bulk_insert_init("INSERT INTO history" .. table_num .. [[
+      (h_c_id, h_c_d_id, h_c_w_id, h_d_id, h_w_id, h_date, h_amount, h_data) values]])
+
+    for d_id = 1, DIST_PER_WARE do
+      for c_id = 1, CUST_PER_DIST do
+        query = string.format([[(%d, %d, %d, %d, %d, NOW(), 10, '%s' )]],
+          c_id, d_id, wid, d_id, wid,
+          string.rep(sysbench.rand.string("@"),sysbench.rand.uniform(12,24))
+        )
+        con:bulk_insert_next(query)
+      end
+    end
+
+    con:bulk_insert_done()
+
+    local tab = {}
+    local a_counts = {}
+    local i
+
+    for i = 1, 3000 do
+      tab[i] = i
+    end
+
+    for i = 1, 3000 do
+      local j = math.random(i, 3000)
+      tab[i], tab[j] = tab[j], tab[i]
+    end
+
+    -- >>: ORDERS
+    con:bulk_insert_init("INSERT INTO orders" .. table_num .. [[
+      (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_carrier_id, o_ol_cnt, o_all_local) values]])
+
+    a_counts[wid] = {}
+
+    for d_id = 1, DIST_PER_WARE do
+      a_counts[wid][d_id] = {}
+
+      for o_id = 1 , 3000 do
+        -- 3,000 rows in the ORDER table with
+        a_counts[wid][d_id][o_id] = sysbench.rand.uniform(5,15)
+
+        query = string.format([[(%d, %d, %d, %d, NOW(), %s, %d, 1 )]],
+          o_id, d_id, wid, tab[o_id],
+          -- hack: (dim) null_value
+          o_id < 2101 and sysbench.rand.uniform(1,10) or null_value,
+          a_counts[wid][d_id][o_id]
+        )
+        con:bulk_insert_next(query)
+      end
+    end
+
+    con:bulk_insert_done()
+
+    -- >>: NEW_ORDERS
+    con:query(string.format(
+      "INSERT INTO new_orders%d (no_o_id, no_d_id, no_w_id) SELECT o_id, o_d_id, o_w_id FROM orders%d WHERE o_id>2100 and o_w_id=%d", table_num, table_num, wid)
+    )
+
+    -- >>: ORDER_LINE
+    con:bulk_insert_init("INSERT INTO order_line" .. table_num .. [[
+      (ol_o_id, ol_d_id, ol_w_id, ol_number, ol_i_id, ol_supply_w_id, ol_delivery_d,
+      ol_quantity, ol_amount, ol_dist_info ) values]]
+    )
+
+    for d_id = 1, DIST_PER_WARE do
+      for o_id = 1, 3000 do
+        for ol_id = 1, a_counts[wid][d_id][o_id] do
+
+          query = string.format([[(%d, %d, %d, %d, %d, %d, %s, 5, %f, '%s' )]],
+            o_id, d_id, wid, ol_id, sysbench.rand.uniform(1, MAXITEMS), wid,
+            -- hack: (dim) null_value
+            o_id < 2101 and "NOW()" or null_value,
+            o_id < 2101 and 0 or sysbench.rand.uniform_double()*9999.99,
+            string.rep(sysbench.rand.string("@"),24)
+          )
+          con:bulk_insert_next(query)
+        end
+      end
+    end
+
+    con:bulk_insert_done()
+
+    -- >>: STOCK
+    con:bulk_insert_init("INSERT INTO stock" .. table_num ..
+    " (s_i_id, s_w_id, s_quantity, s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, s_dist_06, "..
+          " s_dist_07, s_dist_08, s_dist_09, s_dist_10, s_ytd, s_order_cnt, s_remote_cnt, s_data) values"
+    )
+
+    for s_id = 1, 100000 do
+      query = string.format([[(%d, %d, %d,'%s','%s','%s','%s','%s','%s','%s','%s','%s','%s',0,0,0,'%s')]],
+        s_id, wid, sysbench.rand.uniform(10,100),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),24),
+        string.rep(sysbench.rand.string("@"),sysbench.rand.uniform(26,50)))
+
+      con:bulk_insert_next(query)
+    end
+
+    con:bulk_insert_done()
+  end
+end
+
+
+function thread_init()
+  drv = sysbench.sql.driver()
+  con = drv:connect()
+  con:query("SET AUTOCOMMIT=0")
+
+  -- >>: mysql session options..
+  mysql_session_opt( con )
+
+  if( sysbench.tid == 0 ) then
+    print( "=> Using SESSION ops: " .. sysbench.opt.mysql_session_options )
+    check_opt_debug()
+  end
+
+  -- >>: SYNC_file
+  if( string.len( sysbench.opt.sync_file ) > 0 )  then
+    require( "SYNC_file" )
+    SYNC_wait( sysbench.opt.sync_file, sysbench.opt.sync_wait )
+  end
+end
+
+
+function thread_done()
+  con:disconnect()
+end
+
+
+function cleanup()
+  local drv = sysbench.sql.driver()
+  local con = drv:connect()
+
+  con:query("SET FOREIGN_KEY_CHECKS=0")
+
+  for i = 1, sysbench.opt.tables do
+    print(string.format("Dropping tables '%d'...", i))
+    con:query("DROP TABLE IF EXISTS stock" .. i )
+    con:query("DROP TABLE IF EXISTS warehouse" .. i )
+    con:query("DROP TABLE IF EXISTS district" .. i )
+    con:query("DROP TABLE IF EXISTS customer" .. i )
+    con:query("DROP TABLE IF EXISTS history" .. i )
+    con:query("DROP TABLE IF EXISTS new_orders" .. i )
+    con:query("DROP TABLE IF EXISTS orders" .. i )
+    con:query("DROP TABLE IF EXISTS order_line" .. i )
+    con:query("DROP TABLE IF EXISTS item" .. i )
+  end
+end
+
+
+function Lastname(num)
+  local n = {"BAR", "OUGHT", "ABLE", "PRI", "PRES", "ESE", "ANTI", "CALLY", "ATION", "EING"}
+  local name
+
+  name = n[math.floor(num / 100) + 1] .. n[ math.floor(num / 10)%10 + 1] .. n[num%10 + 1]
+
+  return name
+end
+
+local init_rand=1
+local C_255
+local C_1023
+local C_8191
+
+
+function NURand (A, x, y)
+  local C
+
+  if init_rand
+  then
+    C_255 = sysbench.rand.uniform(0, 255)
+    C_1023 = sysbench.rand.uniform(0, 1023)
+    C_8191 = sysbench.rand.uniform(0, 8191)
+    init_rand = 0
+  end
+
+  if A==255
+  then
+    C = C_255
+  elseif A==1023
+  then
+    C = C_1023
+  elseif A==8191
+  then
+    C = C_8191
+  end
+
+  -- return ((( sysbench.rand.uniform(0, A) | sysbench.rand.uniform(x, y)) + C) % (y-x+1)) + x;
+  return ((( bit.bor(sysbench.rand.uniform(0, A), sysbench.rand.uniform(x, y))) + C) % (y-x+1)) + x;
+end

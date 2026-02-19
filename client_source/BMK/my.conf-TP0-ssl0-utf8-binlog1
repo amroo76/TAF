@@ -1,0 +1,73 @@
+[mysqld]
+
+# general
+  ssl=0
+  max_connections=8000
+  back_log=10000
+  table_open_cache_instances=16
+  table_open_cache=8000
+  core_file
+  secure_file_priv=
+  log_error_verbosity=3
+  lc_messages_dir=./share
+  transaction-isolation=REPEATABLE-READ
+
+# utf8
+  character_set_server=utf8mb4
+  collation_server=utf8mb4_0900_ai_ci
+  skip-character-set-client-handshake
+
+# files
+  innodb_file_per_table=1
+  innodb_log_file_size=1024M
+  innodb_log_files_in_group=16
+  innodb_open_files=4000
+
+# buffers
+  join_buffer_size=256K
+  sort_buffer_size=256K
+  innodb_buffer_pool_size=128000M
+  innodb_buffer_pool_instances=24
+  innodb_page_cleaners=24
+  innodb_log_buffer_size=64M
+
+# tune
+  innodb_use_native_aio=1
+  innodb_stats_persistent=1
+  innodb_spin_wait_delay=6
+  innodb_checksum_algorithm=crc32
+  innodb_doublewrite=1
+  loose_innodb_doublewrite_files=2
+  loose_innodb_doublewrite_pages=128
+  innodb_thread_concurrency=0
+  innodb_flush_log_at_trx_commit=1
+  innodb_flush_method=O_DIRECT
+  innodb_use_fdatasync=1
+  innodb_change_buffering=none
+  innodb_max_dirty_pages_pct=90
+  innodb_max_dirty_pages_pct_lwm=10
+  innodb_undo_log_truncate=off
+  innodb_max_purge_lag=0
+  innodb_adaptive_hash_index=0
+  innodb_adaptive_flushing=1
+  innodb_flush_neighbors=0
+  innodb_lru_scan_depth=1000
+  innodb_read_io_threads=16
+  innodb_write_io_threads=4
+  innodb_io_capacity=20000
+  innodb_io_capacity_max=40000
+  innodb_purge_threads=4
+  temptable_use_mmap=OFF
+  temptable_max_ram=4294967296
+
+# Monitoring
+  innodb_monitor_enable='%'
+  performance_schema=ON
+
+# Binlog
+  log_bin=binlog
+  binlog_format=ROW
+  binlog_expire_logs_seconds=300
+  sync_binlog=1
+
+  # skip_log_bin=1
