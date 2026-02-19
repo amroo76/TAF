@@ -320,7 +320,7 @@ my %dispatch = (
     # Generic
     "archive-results"   => \&TAF::ActionWrappers::ArchiveResults,
     "generate-reports"  => \&TAF::ActionWrappers::GenerateReports,
-    "run-tests"         => \&TAF::ActionWrappers::RunTestsCases,
+    "run-tests"         => \&TAF::ActionWrappers::RunTestCases,
 
     # Build
     "build-client"           => \&TAF::ActionWrappers::BuildClientExit,
