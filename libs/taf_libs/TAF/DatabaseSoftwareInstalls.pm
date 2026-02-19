@@ -498,8 +498,9 @@ sub ResolveAndValidateInstall {
     my $rav = StageStart(TAF_DBSI."ResolveAndValidateInstall ->");
 
     # Log the inputs we will use to resolve the install
+    my $dir = $options_ref->{db_software_install_dir} // '<undef>';
     PrintVerbose($rav."Resolving Active Install Marker with the following paths:");
-    PrintVerbose($rav."User options{db_software_install_dir} = $options_ref->{db_software_install_dir}");
+    PrintVerbose($rav."User options{db_software_install_dir} = $dir");
     PrintVerbose($rav."Active Install Marker File            = $files_ref->{active_install}");
 
     # Determine the active install directory. This function encapsulates

@@ -144,6 +144,7 @@ sub ParseCommandLineOptions {
         "duration:s"                  => \$tmp_ref->{duration},
         "environment-variables:s"     => \$tmp_ref->{environment_variables},
         "exit-if-test-lock-exists"    => \$tmp_ref->{exit_if_test_lock_exists},
+        "ignore-running-db-process"   => \$tmp_ref->{ignore_running_db_process},
         "host:s"                      => \$tmp_ref->{host},
         "instances:i"                 => \$tmp_ref->{instances},
         "iterations:i"                => \$tmp_ref->{iterations},
