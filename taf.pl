@@ -4,13 +4,28 @@
 #
 # Created:       August 2025 (TAF 1.0)
 # Redesign:      Novemeber 2025 (TAF 2.0 architecture)
-# Last Modified: January 2026
+# Last Modified: March 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
+#
+# See https://www.gnu.org/licenses/ for details.
 #
 # Original Author:
-#     Jonathan Miller (TAF 1.0, August 2025)
+#     Jonathan "jeb" Miller (TAF 1.0, August 2025)
 #
 # Project History:
 #     TAF 1.0 was originally developed and released independently by
@@ -20,9 +35,6 @@
 #
 #     This file reflects the TAF 2.0 architecture and is maintained by
 #     the MariaDB Foundation.
-#
-# Licensed under the GNU General Public License, version 2 or later (GPLv2+).
-# See https://www.gnu.org/licenses/ for details.
 #
 # PURPOSE:
 #     Serve as the central driver for the Test Automation Framework (TAF).
@@ -125,7 +137,7 @@
 #############################################################################
 use constant FRAMEWORK          => "taf-perl";
 use constant FRAMEWORK_VERSION  => 2;
-use constant FRAMEWORK_REVISION => 0;
+use constant FRAMEWORK_REVISION => 5;
 
 #-------------------------------------------------------------------------------
 #                              Constants
@@ -171,9 +183,10 @@ use FindBin qw($Bin);
 use lib "$Bin/libs";
 use lib "$Bin/libs/script_tools_lib/";
 use lib "$Bin/libs/database_libs";
+use lib "$Bin/libs/profile_libs";
 use lib "$Bin/libs/reporter_libs";
 use lib "$Bin/libs/taf_libs";
-use lib "$Bin/sql_libs";
+use lib "$Bin/libs/sql_libs";
 use lib "$Bin/test_suites";
 
 # Tools
@@ -411,17 +424,27 @@ our %flags = (
 #-------------------------------------------------------------------------------
 our %options = (
     # Core execution / test flow
-    "action"                   => undef, # Action to perform
-    "comments"                 => undef, # Run comments
-    "duration"                 => undef, # How long to run test
-    "iterations"               => undef, # Number of iterations to run the test(s)
-    "tests"                    => undef, # Command-delimited list of tests to run
-    "threads"                  => undef, # Command-delimited list of threads to run
-    "instances"                => undef, # Number of instances for ts that support it
-    "test_suite"               => undef, # Test suite to use
-    "test_suite_properties"    => undef, # TS properties passed on commandline
-    "test_type"                => undef, # Type of testing (for reporting)
-    "do_test_setup_every_test" => undef, # Run test setup on each test
+    "action"                        => undef, # Action to perform
+    "comments"                      => undef, # Run comments
+    "duration"                      => undef, # How long to run test
+    "database_iteration_mode"       => undef, # What to do with db every iteration
+    "database_restore_image_dir"    => undef, # Where restore image is kept
+    "include_warmup_iteration"      => undef, # Warmup database
+    "iterations"                    => undef, # Number of iterations to run the test(s)
+    "restore_image_format"          => undef, # How to handle the restore image.
+    "tests"                         => undef, # Command-delimited list of tests to run
+    "threads"                       => undef, # Command-delimited list of threads to run
+    "test_setup_mode"               => undef, # Test setup mode.
+    "instances"                     => undef, # Number of instances for ts that support it
+    "test_suite"                    => undef, # Test suite to use
+    "test_suite_properties"         => undef, # TS properties passed on commandline
+    "test_type"                     => undef, # Type of testing (for reporting)
+
+    # Execute Script Files
+    "exec_script_file_before_db_start" => undef, # Run script before db start
+    "exec_script_file_after_db_start"  => undef, # Run script after db start
+    "exec_script_file_before_run_iter" => undef, # Run script before run
+    "exec_script_file_after_run_iter"  => undef, # Run script after run start
 
     # Execute SQL Files
     "exec_sql_file_before_test_setup" => undef, # Run SQL file before test setup
@@ -434,7 +457,6 @@ our %options = (
     "skip_database_shutdown"   => undef, # Leave database running on exit
     "skip_test_cleanup"        => undef, # Skip cleaning up test artifacts
     "skip_test_post"           => undef, # Skip running test post
-    "skip_test_setup"          => undef, # Skip test setup
     "skip_test_suite_cleanup"  => undef, # Skip test suite cleanup
 
     # Sleep controls
@@ -468,6 +490,10 @@ our %options = (
     "db_user_pass"               => undef, # DB user password
     "db_user_permissions"        => undef, # Permissions for DB user
 
+    # DB Process Start/Stop wait times
+     "db_start_wait"             => undef, # DB how long to wait for start?
+     "db_stop_wait"              => undef, # DB how long to wait for stopping?
+
     # DB Process Rest Watch
     "db_process_rest_enable"       => undef, # Flag: enable CPU-based rest detection
     "db_process_rest_low"          => undef, # CPU percent considered "at rest"
@@ -480,6 +506,17 @@ our %options = (
     "db_software_install_packages"  => undef, # DB software archive(s)
     "db_software_install_dir"       => undef, # Current install under test
     "db_software_install_root_dir"  => undef, # Where install live
+
+    # Profiling
+    "profiler_enabled"             => undef, # Enable or disable profiling
+    "profiler_lib"                 => undef, # Profiler module to load (e.g. taf-perf)
+    "profiler_duration"            => undef, # Duration of profiling (seconds)
+    "profiler_start_delay"         => undef, # Delay before profiling begins (seconds)
+    "profiler_ts_duration_unit"    => undef, # Test Suie duration unit
+    "profiler_continuous"          => undef, # Continuous mode flag (true/false)
+    "profiler_opts"                => undef, # Profiler-specific option string
+    "profiler_generate_report"     => undef, # Generate profiler report (true/false)
+    "profiler_generate_flamegraph" => undef, # Generate flamegraph data (true/false)
 
     # Reporting
     "generate_report"          => undef, # Generate report after test completes
@@ -540,6 +577,7 @@ my $ctx = {
     state   => {
         first_time_in_tests_loop => TRUE,
         initial_test_setup_done  => FALSE,
+        restore_created          => FALSE,
         warmup_run_done          => FALSE,
         skip_test_setup_warned   => FALSE,
     },

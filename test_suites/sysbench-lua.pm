@@ -2,11 +2,24 @@
 # sysbench-lua.pm - Sysbench Lua + BMK Test Suite for TAF
 #
 # Created: September 2025
-# Last Modified: January 2026
-# Version: 1.0
+# Last Modified: March 2026
+# Version: 1.1
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -1732,22 +1745,22 @@ sub ConfigureStdTestCase{
     } elsif ($test_uc eq "OLTP_RW") {
         $tsOpt{oltp_lua_script} = "oltp_read_write.lua";
         $tsOpt{test_args}  = " --skip-trx=off";
-    
+
     # OLTP_RO
     } elsif ($test_uc eq "OLTP_RO") {
         $tsOpt{oltp_lua_script} = "oltp_read_only.lua";
         $tsOpt{test_args}  = " --skip-trx=$trx_flag";
-    
+
     # UPDATE_KEY
     } elsif ($test_uc eq "UPDATE_KEY") {
         $tsOpt{oltp_lua_script} = $use_bmk ? "OLTP_RW-index_updates-notrx.lua" : "oltp_update_index.lua";
         $tsOpt{test_args}  = " --skip-trx=$trx_flag";
-    
+
     # UPDATE_NO_KEY
     } elsif ($test_uc eq "UPDATE_NO_KEY") {
         $tsOpt{oltp_lua_script} = $use_bmk ? "OLTP_RW-non_index_updates-notrx.lua" : "oltp_update_non_index.lua";
         $tsOpt{test_args}  = " --skip-trx=$trx_flag";
-    
+
     # INSERT
     } elsif ($test_uc eq "INSERT") {
         $tsOpt{oltp_lua_script} = "oltp_insert.lua";
@@ -1757,7 +1770,7 @@ sub ConfigureStdTestCase{
     } elsif ($test_uc eq "DELETE") {
         $tsOpt{oltp_lua_script} = "oltp_delete.lua";
         $tsOpt{test_args}  = " --skip-trx=$trx_flag";
-    
+
     # POINT_SELECT_MODIFIABLE
     } elsif ($test_uc eq "POINT_SELECT_MODIFIABLE") {
         $tsOpt{oltp_lua_script} = "oltp_point_select.lua";
@@ -2222,7 +2235,6 @@ sub IsBMKOnlyTest {
 
     # Search BMK-only list (case-insensitive)
     foreach my $bmkTest (@bmkTests) {
-        PrintVerbose($_chbmk . "$bmkTest eq $test_name");
         if (lc($bmkTest) eq lc($test_name)) {
             PrintVerbose($_chbmk . "BMK-only Test Case Detected");
 

@@ -6,7 +6,20 @@ package reporter_libs::chart_and_test_info_results_tables_html;
 # Last Modified: January 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -192,6 +205,43 @@ sub kurtosis {
     return ($sum / $n) / ($std**4);
 }
 
+#############################################################################
+# parse_config_kv
+#
+# PURPOSE:
+#     Parse MariaDB config file contents into a normalized key=value hash.
+#
+# GUARANTEES:
+#     - Keys are lowercased.
+#     - Comments and blank lines are ignored.
+#     - Returns hashref.
+#############################################################################
+sub parse_config_kv {
+    my ($text) = @_;
+    my %kv;
+
+    for my $line (split /\n/, $text) {
+        next if $line =~ /^\s*#/;
+        next if $line =~ /^\s*$/;
+
+        # Case 1: key=value
+        if ($line =~ /^\s*([^=]+?)\s*=\s*(.*?)\s*$/) {
+            my ($k,$v) = (lc $1, $2);
+            $kv{$k} = $v;
+            next;
+        }
+
+        # Case 2: bare directive (boolean flag)
+        if ($line =~ /^\s*([A-Za-z0-9_]+)\s*$/) {
+            my $k = lc $1;
+            $kv{$k} = '__FLAG__';   # placeholder value
+            next;
+        }
+    }
+
+    return \%kv;
+}
+
 # ---------------------------------------------------------------------------
 # diff_val()
 #
@@ -322,18 +372,35 @@ sub GenerateResults {
         $host_meta_by_user{$user}{ram}          ||= $meta->{ram};
         $host_meta_by_user{$user}{disk}         ||= $meta->{disk};
 
-        #------------------------------
-        # Database metadata
-        #------------------------------
-        my $cmd = $meta->{taf_commandline} // '';
-        my ($cfg_from_cmd) = $cmd =~ /\btaf\.db_config_file=([^ ]+)/;
+       #------------------------------
+       # Database metadata
+       #------------------------------
+       my $cmd = $meta->{taf_commandline} // '';
+       
+       # Split literal command line from merged properties
+       my ($literal, $props) = split /:: prop file contents ->/, $cmd, 2;
+       
+       my $dbconfig;
+       
+       # 1. Command line override (highest precedence)
+       if (defined $literal && $literal =~ /--db-config-file=([^ ]+)/) {
+           $dbconfig = $1;
+       
+       # 2. User properties (second precedence)
+       } elsif (defined $props && $props =~ /\btaf\.db_config_file=([^ ]+)/) {
+           $dbconfig = $1;
+       
+       # 3. Metadata fallback
+       } else {
+           $dbconfig = $meta->{db_config_file} // 'unknown';
+       }
 
         $db_meta_by_user{$user}{dbmaker}   ||= $meta->{database_maker};
         $db_meta_by_user{$user}{dbversion} ||= $meta->{database_version};
         $db_meta_by_user{$user}{dbeng}     ||= $meta->{database_eng};
         $db_meta_by_user{$user}{dbdir}     ||= $meta->{db_install_dir};
         $db_meta_by_user{$user}{dbconfig}  ||= $meta->{db_config_file}
-                                             || $cfg_from_cmd;
+                                             || $dbconfig;
 
         #------------------------------
         # Test metadata
@@ -637,14 +704,31 @@ HTML
         disk         => 'Disk',
     );
 
+    # Baseline is first dataset
+    my $sys_baseline = $users[0];
+
     foreach my $key (@sys_keys) {
         print $fh "<tr><td>$sys_labels{$key}</td>";
+
+        my $base_val = $host_meta_by_user{$sys_baseline}{$key} // 'unknown';
+
         for my $user (@users) {
             my $val = $host_meta_by_user{$user}{$key} // 'unknown';
-            print $fh "<td>$val</td>";
+
+            if ($user eq $sys_baseline) {
+                print $fh "<td>$val</td>";
+            }
+            elsif ($val ne $base_val) {
+                print $fh "<td><b>$val</b></td>";
+            }
+            else {
+                print $fh "<td>$val</td>";
+            }
         }
+
         print $fh "</tr>\n";
     }
+
     print $fh "</table>\n";
     print $fh "</div>\n";
     
@@ -670,25 +754,105 @@ HTML
         dbconfig  => 'Config File',
     );
 
+    # Baseline is first dataset
+    my $db_baseline = $users[0];
+
     foreach my $key (@db_keys) {
         print $fh "<tr><td>$db_labels{$key}</td>";
+
+        my $base_val = $db_meta_by_user{$db_baseline}{$key} // 'unknown';
+
         for my $user (@users) {
             my $val = $db_meta_by_user{$user}{$key} // 'unknown';
-            print $fh "<td>$val</td>";
+
+            if ($user eq $db_baseline) {
+                print $fh "<td>$val</td>";
+            }
+            elsif ($val ne $base_val) {
+                print $fh "<td><b>$val</b></td>";
+            }
+            else {
+                print $fh "<td>$val</td>";
+            }
         }
+
         print $fh "</tr>\n";
     }
 
     print $fh "<tr><td>Config Contents</td>";
+
+    # Baseline is first dataset
+    my $cfg_baseline = $users[0];
+    my $base_raw = $db_meta_by_user{$cfg_baseline}{config_contents} // '';
+    my %base_kv = %{ parse_config_kv($base_raw) };
+
+    # Preserve baseline order
+    my @cfg_ordered_keys = keys %base_kv;
+
+    # Add keys that appear only in other datasets
     for my $user (@users) {
         my $raw = $db_meta_by_user{$user}{config_contents} // '';
-        $raw =~ s/&/&amp;/g;
-        $raw =~ s/</&lt;/g;
-        $raw =~ s/>/&gt;/g;
-        $raw =~ s/\n/<br>/g;
-        print $fh "<td style=\"font-size:smaller;\">$raw</td>";
+        my %kv = %{ parse_config_kv($raw) };
+        for my $k (keys %kv) {
+            push @cfg_ordered_keys, $k unless grep { $_ eq $k } @cfg_ordered_keys;
+        }
     }
+
+    for my $user (@users) {
+
+        my $raw = $db_meta_by_user{$user}{config_contents} // '';
+        my %kv = %{ parse_config_kv($raw) };
+
+        my @out;
+
+        for my $key (@cfg_ordered_keys) {
+            my $val      = $kv{$key};
+            my $base_val = $base_kv{$key};
+
+            # Build display line
+            my $line;
+            if (!defined $val) {
+                $line = "(missing)";
+            }
+            elsif ($val eq '__FLAG__') {
+                # bare directive like "log_bin"
+                $line = $key;
+            }
+            else {
+                $line = "$key=$val";
+            }
+
+            # HTML escape
+            $line =~ s/&/&amp;/g;
+            $line =~ s/</&lt;/g;
+            $line =~ s/>/&gt;/g;
+
+            # Bold logic
+            if ($user eq $cfg_baseline) {
+                push @out, $line;
+            }
+            elsif (!defined $base_val) {
+                # Key exists here but not in baseline
+                push @out, "<b>$line</b>";
+            }
+            elsif (!defined $val) {
+                # Key missing here but present in baseline
+                push @out, "<b>(missing)</b>";
+            }
+            elsif ($val ne $base_val) {
+                push @out, "<b>$line</b>";
+            }
+            else {
+                push @out, $line;
+            }
+        }
+
+        my $joined = join("<br>", @out);
+        print $fh "<td style=\"font-size:smaller;\">$joined</td>";
+    }
+
     print $fh "</tr>\n";
+
 
     print $fh "</table>\n";
 

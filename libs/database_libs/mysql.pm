@@ -6,7 +6,20 @@ package mysql;
 # Last Modified: January 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026  MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -234,6 +247,8 @@ sub new {
 
         # Locality and performance
         cpus           => $args{db_task_set},
+        db_start_wait  => $args{db_start_wait},
+        db_stop_wait   => $args{db_stop_wait},
         tmpdir         => $args{tmp_dir},
 
         # Extras
@@ -528,7 +543,7 @@ sub db_start {
     }
 
     # Wait for server readiness
-    $rc = $self->_wait_for_start(30);
+    $rc = $self->_wait_for_start();
     if ($rc != OK) {
         PrintError($_st."mysqld wait for start failed, see $self->{error_log}");
         return ERROR;
@@ -942,7 +957,6 @@ sub _db_start_bootstrap {
     }
 
     # readiness loop: require socket creation, ping success, and pid liveness
-    my $timeout = 60;
     my $ready   = 0;
 
     # read bootstrap pid for early-exit detection
@@ -955,6 +969,8 @@ sub _db_start_bootstrap {
         }
     }
 
+    my $timeout = $self->{db_start_wait};
+    $timeout = 120 if !defined $timeout;
     for (1..$timeout) {
         # fail fast if mysqld exited before becoming ready
         if (defined $pid && $pid =~ /^\d+$/ && !kill 0, $pid) {
@@ -1052,7 +1068,8 @@ sub _db_stop_bootstrap {
     kill 'TERM', $pid;
 
     # wait for process to exit or be reaped
-    my $timeout = 60;
+    my $timeout = $self->{db_stop_wait};
+    $timeout = 120 if !defined $timeout;
     for (1..$timeout) {
 
         # attempt to reap child if it has already exited
@@ -1431,8 +1448,8 @@ sub _db_execute_no_return_query {
 #     - Caller must treat ERROR as a hard failure and abort startup sequence.
 ###############################################################################
 sub _wait_for_start {
-    my ($self, $timeout) = @_;
-    $timeout ||= 60; # seconds
+    my ($self) = @_;
+
     my $_wfs = StageStart($_me." -> _wait_for_start ->");
 
     # resolve mysqladmin path and ensure it is executable
@@ -1462,6 +1479,8 @@ sub _wait_for_start {
         }
     }
 
+    my $timeout = $self->{db_start_wait};
+    $timeout = 90 if !defined $timeout;
     PrintVerbose($_wfs."Waiting up to $timeout seconds for mysqld to become ready...");
 
     # poll mysqladmin ping in 0.5 second intervals
@@ -1530,8 +1549,8 @@ sub _wait_for_start {
 #     - Caller must treat ERROR as a hard failure and abort shutdown sequence.
 ###############################################################################
 sub _wait_for_stop {
-    my ($self, $timeout) = @_;
-    $timeout ||= 120; # seconds
+    my ($self) = @_;
+
     my $_wfs = StageStart($_me." -> _wait_for_stop ->");
 
     # resolve mysqladmin path and ensure it is executable
@@ -1561,6 +1580,8 @@ sub _wait_for_stop {
         }
     }
 
+    my $timeout = $self->{db_stop_wait};
+    $timeout = 120 if !defined $timeout;
     PrintVerbose($_wfs."Waiting up to $timeout seconds for mysqld to stop...");
 
     # poll mysqladmin ping until it fails (server down)

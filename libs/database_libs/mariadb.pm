@@ -3,10 +3,23 @@ package mariadb;
 # mariadb.pm - MariaDB Database Plugin for TAF
 #
 # Created:       January 2026
-# Last Modified: January 2026
+# Last Modified: April 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -210,6 +223,8 @@ sub new {
 
         # Locality and performance
         cpus           => $args{db_task_set},
+        db_start_wait  => $args{db_start_wait},
+        db_stop_wait   => $args{db_stop_wait},
         tmpdir         => $args{tmp_dir},
 
         # Extras
@@ -306,8 +321,8 @@ sub new {
 #     - No MySQL-specific assumptions are used anywhere in this routine.
 ################################################################################
 sub db_init {
-    my ($self) = @_;
-    my $_init = StageStart($_me." -> Init Database -> ");
+     my ($self) = @_;
+     my $_init = StageStart($_me." -> Init Database -> ");
 
     # Validate binaries and configuration
     return ERROR if $self->_db_validate_binaries() != OK;
@@ -315,6 +330,8 @@ sub db_init {
 
     # Load config-derived paths
     $self->_db_load_config_paths();
+
+    $self->_db_detect_ssl_settings();
 
     # Prepare data_dir
     return ERROR if $self->_db_prepare_data_dir() != OK;
@@ -423,7 +440,7 @@ sub db_init {
 #       bootstrap server used during initialization.
 ###############################################################################
 sub db_start {
-    my ($self) = @_;
+    my ($self, $wait_seconds) = @_;
     my $_st = StageStart($_me." -> Database Start -> ");
 
     # Resolve runtime paths and binaries
@@ -493,7 +510,7 @@ sub db_start {
     }
 
     # Wait for full server readiness
-    $rc = $self->_wait_for_start($self->{startup_timeout} // 30);
+    $rc = $self->_wait_for_start($wait_seconds);
     if ($rc != OK) {
         PrintError($_st."MariaDB runtime server did not become ready, see $log");
         return ERROR;
@@ -560,7 +577,7 @@ sub db_start {
 #     - Zombie processes are avoided via waitpid() after confirmed exit.
 ###############################################################################
 sub db_stop {
-    my ($self) = @_;
+    my ($self, $wait_seconds) = @_;
     my $_st = StageStart($_me." -> Database Stop -> ");
 
     my $pidfile = $self->{pidfile};
@@ -630,7 +647,9 @@ sub db_stop {
         PrintVerbose($_st."mariadb-admin shutdown accepted; waiting for server to stop");
 
         # TERM wait loop: attempt non-blocking reap and poll for process exit
-        my $timeout = $self->{shutdown_timeout} // 120;
+        my $timeout = $self->{db_stop_wait};
+        $timeout = 120 if !defined $timeout;
+
         for (1..$timeout) {
     
             # try to reap if it has already exited (including zombie)
@@ -666,7 +685,9 @@ sub db_stop {
     kill 'TERM', $pid;
 
     # Determine shutdown timeout and begin TERM wait loop
-    my $timeout = $self->{shutdown_timeout} // 120;
+    my $timeout = $self->{db_stop_wait};
+    $timeout = 120 if !defined $timeout;
+
     for (1..$timeout) {
 
         # Check if the process has already exited (non-blocking reap)
@@ -895,9 +916,13 @@ sub _db_execute_no_return_query {
         return ERROR;
     }
 
+    # SSL handling: disable SSL negotiation if server config disables SSL
+    my $ssl_flag = $self->{ssl_disabled} ? "--skip-ssl" : "";
+
     # Build base command
     my @cmd = (
         $client,
+        $ssl_flag,
         "--socket=$socket",
         "--user=$user",
     );
@@ -2221,7 +2246,7 @@ sub _run_command {
 #     - All flags are passed exactly as intended via exec() argv.
 ###############################################################################
 sub _db_start_bootstrap {
-    my ($self) = @_;
+    my ($self, $wait_seconds) = @_;
     my $_boot = StageStart($_me." -> StartBootstrap -> ");
 
     # Resolve required paths
@@ -2356,7 +2381,9 @@ sub _db_stop_bootstrap {
     kill 'TERM', $pid;
 
     # Wait for process to exit, reaping as soon as it does
-    my $timeout = $self->{shutdown_timeout} // 120;
+    my $timeout = $self->{db_stop_wait};
+    $timeout = 90 if !defined $timeout;
+
     for (1..$timeout) {
 
         my $reap = waitpid($pid, POSIX::WNOHANG());
@@ -2522,7 +2549,6 @@ sub _wait_for_start {
     my ($self) = @_;
 
     my $_tag = "MariaDB::_wait_for_start: ";
-    my $timeout = 60;
 
     my $mysqladmin = $self->{mariadb_admin_bin};
     unless ($mysqladmin && -x $mysqladmin) {
@@ -2537,6 +2563,9 @@ sub _wait_for_start {
     my $auth = "--user=\"$self->{db_root_user}\"";
     $auth .= " --password=\"$self->{db_root_pass}\"" if $self->{db_root_pass};
 
+    # SSL handling: disable SSL negotiation if server config disables SSL
+    my $ssl_flag = $self->{ssl_disabled} ? "--skip-ssl" : "";
+
     # PID file (bootstrap and real server both set $self->{pidfile})
     my $pidfile = $self->{pidfile};
     my $pid;
@@ -2548,6 +2577,8 @@ sub _wait_for_start {
         }
     }
 
+    my $timeout = $self->{db_start_wait};
+    $timeout = 90 if !defined $timeout;
     PrintVerbose($_tag."Waiting up to $timeout seconds for server readiness...");
 
     for (1..$timeout*2) {  # half-second intervals
@@ -2570,7 +2601,9 @@ sub _wait_for_start {
             $conn = qq{--host=localhost --port="$self->{port}"};
         }
 
-        my $rc = system("$mysqladmin $conn $auth ping > /dev/null 2>&1");
+        my $cmd = "$mysqladmin $ssl_flag $conn $auth ping > /dev/null 2>&1";
+        my $rc  = system($cmd);
+
         if ($rc == 0) {
             PrintVerbose($_tag."Server is ready");
             return OK;
@@ -2617,8 +2650,9 @@ sub _wait_for_start {
 #       may still be alive.
 ################################################################################
 sub _wait_for_stop {
-    my ($self, $timeout) = @_;
-    $timeout ||= 120;
+    my ($self) = @_;
+    my $timeout = $self->{db_stop_wait};
+    $timeout = 120 if !defined $timeout;
 
     my $_tag = "MariaDB::_wait_for_stop: ";
 
@@ -2659,6 +2693,89 @@ sub _wait_for_stop {
 
     PrintError($_tag."Server did not stop within $timeout seconds");
     return ERROR;
+}
+
+################################################################################
+#  _db_detect_ssl_settings
+#
+#  Purpose:
+#      Inspect the MariaDB server configuration file and determine
+#      whether SSL/TLS is effectively disabled. This routine scans
+#      for explicit directives such as:
+#          ssl=0
+#          skip_ssl
+#          require_secure_transport=off
+#      as well as empty TLS/SSL parameter assignments (tls_version,
+#      ssl_ca, ssl_cert, ssl_key). If any of these conditions are
+#      detected, the plugin sets $self->{ssl_disabled} = 1.
+#
+#  Behavior:
+#      - Reads the server config file line-by-line.
+#      - Strips comments and whitespace.
+#      - Flags SSL as disabled if any known "SSL off" directive is found.
+#      - Emits a single warning if SSL is disabled, informing that
+#        --skip-ssl will be used for all client connections.
+#
+#  Returns:
+#      OK on completion (always), regardless of SSL state.
+#
+#  Notes:
+#      This routine does not modify the server config; it only detects
+#      SSL state so that client-side commands (mysqladmin, mysql, etc.)
+#      can be forced into non-SSL mode when appropriate.
+################################################################################
+sub _db_detect_ssl_settings {
+    my ($self) = @_;
+    my $cfg = $self->{config};
+
+    $self->{ssl_disabled} = 0;
+
+    return OK unless defined $cfg && -r $cfg;
+
+    if (open(my $fh, "<", $cfg)) {
+        while (my $line = <$fh>) {
+
+            $line =~ s/#.*$//;
+            $line =~ s/^\s+|\s+$//g;
+            next unless length $line;
+
+            if ($line =~ /^ssl\s*=\s*0/i) {
+                $self->{ssl_disabled} = 1;
+                next;
+            }
+            if ($line =~ /^skip_ssl/i) {
+                $self->{ssl_disabled} = 1;
+                next;
+            }
+            if ($line =~ /^require_secure_transport\s*=\s*off/i) {
+                $self->{ssl_disabled} = 1;
+                next;
+            }
+            if ($line =~ /^tls_version\s*=\s*$/i) {
+                $self->{ssl_disabled} = 1;
+                next;
+            }
+            if ($line =~ /^ssl_ca\s*=\s*$/i) {
+                $self->{ssl_disabled} = 1;
+                next;
+            }
+            if ($line =~ /^ssl_cert\s*=\s*$/i) {
+                $self->{ssl_disabled} = 1;
+                next;
+            }
+            if ($line =~ /^ssl_key\s*=\s*$/i) {
+                $self->{ssl_disabled} = 1;
+                next;
+            }
+        }
+        close($fh);
+    }
+
+   if ($self->{ssl_disabled}){
+      PrintWarning("MariaDB: SSL disabled by server config (ssl=0 or skip_ssl). Using --skip-ssl for all db work connections.");
+   }
+
+    return OK;
 }
 
 #############################################################################

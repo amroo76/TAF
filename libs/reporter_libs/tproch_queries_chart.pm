@@ -6,10 +6,24 @@ package reporter_libs::tproch_queries_chart;
 # Last Modified: January 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
+#
 #
 # PURPOSE:
 #     Generate a Chart.js visualization of TPROCH per-query benchmark results.
@@ -134,8 +148,22 @@ sub GenerateResults {
     #     - Iteration count is computed deterministically.
     # -------------------------------------------------------------------------
     my $cmdline = $meta->{taf_commandline} // '';
-    my ($dbconfig) = $cmdline =~ /taf\.db_config_file=([^ ]+)/;
-    $dbconfig ||= $meta->{db_config_file} // 'unknown';
+
+    # Split literal command line from merged properties
+    my ($literal, $props) = split /:: prop file contents ->/, $cmdline, 2;
+
+    my $dbconfig;
+
+    # 1. Command line override (highest precedence)
+    if ($literal =~ /--db-config-file=([^ ]+)/) {
+        $dbconfig = $1;
+    # 2. User properties (second precedence)
+    } elsif (defined $props && $props =~ /taf\.db_config_file=([^ ]+)/) {
+        $dbconfig = $1;
+    # 3. Metadata fallback
+    } else {
+        $dbconfig = $meta->{db_config_file} // 'unknown';
+    }
 
     my $resolved_cfg = resolve_config_path($dbconfig);
     my $config_contents = "[config file not found or inaccessible]";

@@ -2,14 +2,24 @@ package TAF::DatabaseSoftwareInstalls;
 #############################################################################
 # TAF::DatabaseSoftwareInstalls
 #
-# Created: 2025
-# Last Modified: 2026
+# Created: Nov 2025
+# Last Modified: March 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
 #
-# Licensed under the GNU General Public License, version 2 or later (GPLv2+).
-# See https://www.gnu.org/licenses/ for details.
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # PURPOSE:
 #     Provide deterministic, contributor-proof management of database software
@@ -81,6 +91,7 @@ use strict;
 use warnings;
 use File::Path;
 use File::Copy;
+use File::Find ();
 
 BEGIN {
     my $here      = File::Basename::dirname(__FILE__);
@@ -109,7 +120,7 @@ use TAF::Utilities qw(PluginAliases PluginBinPriority);
 require toolsLib;
 
 use constant TAF_DBSI => 'TAF::DatabaseSoftwareInstalls -> ';
-our $VERSION = '2.0';
+our $VERSION = '2.5';
 
 # Local working state for install/update operations
 # This is NOT part of the TAF context and must never be persisted.
@@ -304,6 +315,59 @@ sub DoInstall {
     my $stage_dir;     # temporary staging directory
     my $install_root;  # normalized install tree
 
+    #-------------------------------------------------------------------------
+    # SAFETY CHECK: Prevent installing when the target install directory
+    #               already exists.
+    #
+    # PURPOSE:
+    #     The install directory name is the canonical identity of an install.
+    #     If it already exists, we refuse to install. The user must either:
+    #         - use the existing install
+    #         - remove/delete it
+    #         - or run an update
+    #
+    # BEHAVIOR:
+    #     - No guessing.
+    #     - No version inference.
+    #     - No heuristics.
+    #     - Deterministic and contributor-proof.
+    #-------------------------------------------------------------------------
+
+    my $root_dir = $ctx->{dirs}{db_installs_root_dir};
+    my $pkgs     = $ctx->{options}{db_software_install_packages};
+    
+    # Normalize to arrayref
+    $pkgs = [$pkgs] unless ref $pkgs eq 'ARRAY';
+    
+    # Now declare @pkgs properly
+    my @pkgs = @$pkgs;
+    
+    # Determine the install directory name exactly as the pipeline will create it
+    my $base_pkg = _SelectBasePackage(\@pkgs);
+    my $install_dir_name = basename($base_pkg);
+    $install_dir_name =~ s/\.(tar\.gz|tgz|tar\.xz|tar\.bz2|tar|rpm|deb|zip)$//i;
+    
+    if (!defined $install_dir_name) {
+        PrintError("Unable to determine install directory name from packages");
+        return ERROR;
+    }
+
+    my $final_install_path = File::Spec->catdir($root_dir, $install_dir_name);
+    
+    if (-d $final_install_path) {
+        Print("");
+        Print("/tERROR: Install directory already exists:");
+        Print("/t         $final_install_path");
+        Print("");
+        Print("/tRefusing to install.");
+        Print("/tYou must either:");
+        Print("/t   1. Use the existing install");
+        Print("/t   2. Remove/delete the existing install");
+        Print("/t   3. Or run an update via --db-software-update-install");
+        Print("");
+        return ERROR;
+    }
+
     # See if there are leftovers from previous and warn users
     if ($ctx->{options}{verbose}) {
         _WarnAboutStaleStagingDirs($ctx);
@@ -311,7 +375,7 @@ sub DoInstall {
 
     # Validations (package list + existence)
     my @packages = _PerformInstallValidations($ctx);
-    unless (@packages) {
+    if (!@packages) {
         PrintError("Install failed: package validation did not return any packages");
         return ERROR;
     }
@@ -319,8 +383,8 @@ sub DoInstall {
     # Extraction + normalization
     ($stage_dir, $install_root) = _PerformInstallExtraction($ctx, \@packages);
 
-    unless (defined $stage_dir && -d $stage_dir &&
-            defined $install_root && -d $install_root) {
+    if (!(defined $stage_dir && -d $stage_dir &&
+          defined $install_root && -d $install_root)) {
 
         PrintError("Install failed: extraction phase did not produce a valid install_root");
 
@@ -512,7 +576,7 @@ sub ResolveAndValidateInstall {
     );
 
     # If resolution failed, log and return ERROR (do not die)
-    unless (defined $install_dir) {
+    if (!defined $install_dir) {
         PrintError($rav."_ResolveActiveInstall failed to return a valid database software install directory");
         return ERROR;
     }
@@ -536,7 +600,7 @@ sub ResolveAndValidateInstall {
     my $dbMaker = _ResolveInstallType($install_dir);
 
     # If we cannot infer the maker, fail early and log the reason.
-    unless (defined $dbMaker) {
+    if (!defined $dbMaker) {
         PrintError($rav."Database maker not returned!");
         return ERROR;
     }
@@ -546,7 +610,7 @@ sub ResolveAndValidateInstall {
 
     # Ensure the loaded test suite provides the expected validation hook.
     # Using UNIVERSAL::can keeps this check dynamic and avoids hard dependencies.
-    unless (UNIVERSAL::can('main', 'ValidateTargetWithSuite')) {
+    if (!UNIVERSAL::can('main', 'ValidateTargetWithSuite')) {
         PrintError($rav."Loaded test suite does not implement ValidateTargetWithSuite");
         return ERROR;
     }
@@ -867,7 +931,7 @@ sub _SetActiveInstall {
 
     # Absolute path a+' treat as explicit fullN install path
     if (defined $install && File::Spec->file_name_is_absolute($install)) {
-        unless (-d $install) {
+        if (!(-d $install)) {
             Print("ERROR: Explicit install path does not exist: $install");
             return ERROR;
         }
@@ -875,7 +939,7 @@ sub _SetActiveInstall {
     }
     else {
         # Relative name a+' must resolve under db_installs_root_dir
-        unless (defined $root_dir && -d $root_dir) {
+        if (!(defined $root_dir && -d $root_dir)) {
             Print("ERROR: db_installs_root_dir is not set or missing: " .
                   (defined $root_dir ? $root_dir : "UNDEF"));
             return ERROR;
@@ -883,7 +947,7 @@ sub _SetActiveInstall {
 
         $target = File::Spec->catdir($root_dir, $install);
 
-        unless (-d $target) {
+        if (!(-d $target)) {
             Print("ERROR: Install not found under root: $target");
             return ERROR;
         }
@@ -895,7 +959,7 @@ sub _SetActiveInstall {
     # Persist via canonical resolver
     my $path = _ResolveActiveInstall($target, $marker_file, $verbose);
 
-    unless (defined $path) {
+    if (!defined $path) {
         Print("ERROR: Failed to finalize active install ($target)");
         return ERROR;
     }
@@ -938,7 +1002,7 @@ sub _WriteActiveInstallMarker {
     my $tmp = $marker_file . '.tmp';
 
     # Reject undef or empty install_path to prevent writing a corrupt marker file
-    unless (defined $install_path && length $install_path) {
+    if (!(defined $install_path && length $install_path)) {
         Print("\n\tERROR: install_path is undefined or empty, refusing to write marker");
         return ERROR;
     }
@@ -952,7 +1016,7 @@ sub _WriteActiveInstallMarker {
     close($fh);
 
     # Atomically replace the old marker with the new one
-    unless (rename($tmp, $marker_file)) {
+    if (!rename($tmp, $marker_file)) {
         Print("\n\tERROR: Failed to finalize active install marker: $marker_file ($!)");
 
         # Cleanup: remove the temporary file to avoid polluting the installs directory
@@ -1002,7 +1066,9 @@ sub _ResolveInstallType {
     my ($install_dir) = @_;
 
     # Return undef if no install directory provided
-    return UNDEF unless defined $install_dir;
+    if (!defined $install_dir) {
+        return UNDEF;
+    }
 
     # Apply inference strategies in order; take first non-undef result
     my $type = _InferTypeFromPath($install_dir)
@@ -1052,7 +1118,9 @@ sub _InferTypeFromPath {
     my $aliases = PluginAliases();
 
     # Return undef if no path provided
-    return UNDEF unless defined $path;
+    if (!defined $path) {
+        return UNDEF;
+    }
 
     # Scan for alias fragments in the install path
     foreach my $alias (keys %$aliases) {
@@ -1103,11 +1171,15 @@ sub _InferTypeFromBinaries {
     my $priority = PluginBinPriority();
 
     # Return undef if no install directory provided
-    return UNDEF unless defined $install_dir;
+    if (!defined $install_dir) {
+        return UNDEF;
+    }
 
     # Construct bin/ directory path and ensure it exists
     my $bin_dir = "$install_dir/bin";
-    return UNDEF unless -d $bin_dir;
+    if (!(-d $bin_dir)) {
+        return UNDEF;
+    }
 
     # Scan executables in priority order
     foreach my $exe (@$priority) {
@@ -1158,7 +1230,9 @@ sub _InferTypeFromMetadata {
     my $aliases = PluginAliases();
 
     # Return undef if no install directory provided
-    return UNDEF unless defined $install_dir;
+    if (!defined $install_dir) {
+        return UNDEF;
+    }
 
     # Metadata files to inspect
     my @files = ("$install_dir/README", "$install_dir/VERSION");
@@ -1173,7 +1247,7 @@ sub _InferTypeFromMetadata {
 
         # Open file for reading
         my $fh;
-        unless (open $fh, '<', $file) {
+        if (!open $fh, '<', $file) {
             PrintWarning("_InferTypeFromMetadata: cannot open $file ($!)");
             next;
         }
@@ -1231,7 +1305,9 @@ sub _ListDatabaseSoftwareInstalls {
     my ($ctx) = @_;
 
     my @installs = _GetListOfInstalls($ctx);
-    return () unless @installs;
+    if (!@installs) {
+        return ();
+    }
 
     my $active = ReadActiveInstallMarker($ctx->{files}{active_install});
 
@@ -2021,7 +2097,7 @@ sub _GetLibraryPath {
 
     my $glp = StageStart(TAF_DBSI."_GetLibraryPath");
 
-    unless (defined $base && -d $base) {
+    if (!(defined $base && -d $base)) {
         PrintError($glp."Base install directory not found or invalid: " . ($base // UNDEF));
         StageEnd($glp);
         return UNDEF;
@@ -2092,7 +2168,7 @@ sub _ValidateInstallPackageList {
     my $options_ref = $ctx->{options};
     my $pkg_list    = $options_ref->{db_software_install_packages};
 
-    unless (defined $pkg_list && $pkg_list ne '') {
+    if (!(defined $pkg_list && $pkg_list ne '')) {
         PrintError("No install packages specified.");
         return;
     }
@@ -2100,7 +2176,7 @@ sub _ValidateInstallPackageList {
     my @packages = grep { defined $_ && $_ ne '' }
                    split(/\s*,\s*/, $pkg_list);
 
-    unless (@packages) {
+    if (!@packages) {
         PrintError("No valid packages found in list: $pkg_list");
         return;
     }
@@ -2140,9 +2216,8 @@ sub _ValidateInstallPackageList {
 sub _ValidateEachPackageExists {
     my ($ctx, $packages_ref) = @_;
 
-
     for my $pkg (@$packages_ref) {
-        unless (-f $pkg) {
+        if (!(-f $pkg)) {
             PrintError("Install package not found: $pkg");
             return ERROR;
         }
@@ -2165,52 +2240,51 @@ sub _ValidateEachPackageExists {
 #     $tmp_unpack
 #         Temporary directory used as the staging root.
 #
-#     $packages_ref
-#         Arrayref of package paths; the first (or selected) entry is the base.
-#
-# BEHAVIOR:
-#     - Retrieve tools_debug from the context.
-#     - Select the base package deterministically.
-#     - Extract the archive into the temporary staging directory.
-#     - Validate that extraction succeeded and the staging root exists.
-#     - Remove the staging directory on failure to prevent partial state.
+#     $packages_ref_or_scalar
+#         EITHER:
+#           - Arrayref of package paths; OR
+#           - Single package path (scalar).
+#         This routine normalizes to an arrayref before selecting the base.
 #
 # RETURNS:
 #     <string>  - Staging root directory path.
 #     UNDEF     - Extraction failed or staging root invalid.
-#
-# NOTES:
-#     - INTERNAL routine; not for external callers.
-#     - Extraction does not interpret or restructure package contents.
-#     - Staging root is returned even if the package creates its own
-#       top-level directory; merging occurs later.
-#     - Failures are explicit; no partial extraction state is allowed.
 #===============================================================================
 sub _UnpackBasePackage {
-    my ($ctx, $tmp_unpack, $packages_ref) = @_;
+    my ($ctx, $tmp_unpack, $packages_ref_or_scalar) = @_;
 
     my $options = $ctx->{options};
     my $debug   = $options->{tools_debug} || 0;
     my $di      = StageStart(TAF_DBSI."_UnpackBasePackage ->");
 
-    # Select the base package deterministically (server-preferred, then usr/)
+    # Normalize input to an arrayref, regardless of caller behavior
+    my @pkgs =
+        ref($packages_ref_or_scalar) eq 'ARRAY'
+            ? @$packages_ref_or_scalar
+            : ($packages_ref_or_scalar);
+
+    my $packages_ref = \@pkgs;
+
+    # Select the base package deterministically (bundle/server/client)
     my $base_pkg = _SelectBasePackage($packages_ref);
+
+    if (!defined $base_pkg) {
+        PrintError($di."Failed to select base package");
+        toolsLib::RemoveTree($tmp_unpack, 10, $debug);
+        return;
+    }
 
     PrintVerbose($di."Unpacking base package: $base_pkg");
 
-    # Extract into the staging root. We don't care which top-level
-    # directory it creates; later we will merge all of them into a
-    # fresh install_root.
     my $rc = toolsLib::ExtractArchive($tmp_unpack, $base_pkg, $debug, 'base');
 
-    unless ($rc && -d $tmp_unpack) {
+    if (!($rc && -d $tmp_unpack)) {
         PrintError($di."Failed to unpack base package: $base_pkg");
         toolsLib::RemoveTree($tmp_unpack, 10, $debug);
         return;
     }
 
     StageEnd($di);
-    # Return the staging root, not the package-specific directory
     return $tmp_unpack;
 }
 
@@ -2218,42 +2292,49 @@ sub _UnpackBasePackage {
 # _UnpackLayeredPackages
 #
 # PURPOSE:
-#     Apply all layered (non-base) packages on top of the already-unpacked
-#     base staging directory. Produce a unified install root representing the
-#     merged filesystem contents of all layered packages, with packaging
-#     artifacts removed before returning.
+#     Apply all non-base install packages on top of the already-unpacked base
+#     package and produce a single unified install_root. This routine performs
+#     layered extraction, wrapper-directory flattening, and top-level directory
+#     merging to create the canonical install tree used by subsequent
+#     normalization steps.
 #
 # PARAMETERS:
 #     $ctx
-#         TAF context hashref containing options.tools_debug.
+#         Full TAF context hashref containing options.tools_debug.
 #
 #     $stage_root
-#         Directory containing the already-unpacked base package.
+#         Temporary staging directory containing the unpacked base package.
 #
 #     $packages_ref
-#         Arrayref of package paths; all non-base entries are layered packages.
+#         Arrayref of all install packages (base + layers). The base package is
+#         determined content-wise via _SelectBasePackage(); all others are
+#         treated as layered packages.
 #
 # BEHAVIOR:
-#     - Identify the base package selected during validation.
-#     - Extract each remaining package (RPM, tar, or other supported type)
-#       into the staging root in deterministic order.
+#     - Identify the base package using content-based selection.
+#     - Extract each layered package into the staging root in deterministic
+#       order, skipping the base package.
 #     - Validate staging integrity after each extraction.
-#     - Collect all top-level directories created by layered extraction.
-#     - Merge those directories into a fresh unified install_root.
-#     - Remove leftover packaging artifacts (such as .rpm files) from the
+#     - Discover all top-level directories created by base and layered
+#       extraction.
+#     - Merge all discovered top-level directories into a fresh install_root
+#       under the staging root, flattening wrapper directories when present.
+#     - Remove leftover packaging artifacts (e.g., .rpm files) from the
 #       unified install_root.
 #     - Emit verbose logging for all extraction and merge operations.
 #     - Fail immediately on any extraction or merge error.
 #
 # RETURNS:
-#     <string>  - Path to the unified install_root directory.
-#     undef     - Extraction or merge failure.
+#     <string>  - Absolute path to the unified install_root directory.
+#     undef     - Any extraction, merge, or cleanup failure.
 #
 # NOTES:
-#     - INTERNAL routine; not for external callers.
+#     - INTERNAL routine; not intended for external callers.
+#     - install_root produced here is the canonical input to
+#       _ScanAndUnpackInnerTarballs() and _NormalizeUsrLayout().
 #     - Layering order is deterministic and must not be altered.
-#     - The unified install_root is the canonical input to
-#       _NormalizeUsrLayout().
+#     - Wrapper-directory flattening is performed during the merge phase.
+#     - No silent fallbacks are permitted; all failures are explicit.
 #===============================================================================
 sub _UnpackLayeredPackages {
     my ($ctx, $stage_root, $packages_ref) = @_;
@@ -2268,13 +2349,15 @@ sub _UnpackLayeredPackages {
     # Extract all layered packages into the staging root
     for my $pkg (@$packages_ref) {
 
-        next if defined $base_pkg && $pkg eq $base_pkg;
+        if (defined $base_pkg && $pkg eq $base_pkg) {
+            next;
+        }
 
         PrintVerbose($di."Unpacking layered package: $pkg");
 
         my $rc = toolsLib::ExtractArchive($stage_root, $pkg, $debug, 'layer');
 
-        unless ($rc && -d $stage_root) {
+        if (!($rc && -d $stage_root)) {
             PrintError($di."Failed to unpack layered package: $pkg");
             return undef;
         }
@@ -2283,7 +2366,7 @@ sub _UnpackLayeredPackages {
     # Collect all top-level directories under the staging root
     my @top_dirs = _CollectTopLevelDirs($stage_root, $debug);
 
-    unless (@top_dirs) {
+    if (!@top_dirs) {
         PrintError($di."No top-level directories detected in staging after layered unpack.");
         return undef;
     }
@@ -2291,10 +2374,39 @@ sub _UnpackLayeredPackages {
     # Merge all top-level dirs into a fresh unified install_root
     my $install_root = _MergeTopLevelDirs($stage_root, \@top_dirs, $debug);
 
-    unless ($install_root && -d $install_root) {
+    if (!($install_root && -d $install_root)) {
         PrintError($di."Failed to merge layered package trees into a unified install root.");
         return undef;
     }
+
+    ###########################################################################
+    # Extract inner tarballs inside install_root
+    ###########################################################################
+    if (opendir(my $idh, $install_root)) {
+        my @inner_archives = grep {
+            /\.(tar|tar\.gz|tar\.xz|tgz|txz|tbz)$/
+        } readdir($idh);
+        closedir($idh);
+
+        for my $archive (@inner_archives) {
+            my $path = File::Spec->catfile($install_root, $archive);
+
+            PrintVerbose($di."Attempting to extract inner archive: $path");
+
+            my $cmd = "tar -xf '$path' -C '$install_root'";
+            PrintVerbose($di."Running: $cmd") if $debug;
+
+            my $rc = system($cmd);
+
+            if ($rc != 0) {
+                PrintWarning($di."Inner archive could not be extracted and will be skipped: $archive");
+                next;
+            }
+
+            unlink $path;
+        }
+    }
+    ###########################################################################
 
     # Remove leftover RPMs from the unified install root
     if (opendir(my $dh, $install_root)) {
@@ -2312,6 +2424,59 @@ sub _UnpackLayeredPackages {
         PrintError($di."Unable to open install_root for RPM cleanup: $install_root");
         return undef;
     }
+
+    ###########################################################################
+    # INLINE NORMALIZATION: flatten the actual server directory if nested
+    ###########################################################################
+    if (opendir(my $ndh, $install_root)) {
+
+        my @dirs = grep {
+            -d File::Spec->catdir($install_root, $_)
+            && $_ ne '.'
+            && $_ ne '..'
+        } readdir($ndh);
+
+        closedir($ndh);
+
+        # Find the directory that contains bin/
+        my $server_dir = undef;
+
+        for my $d (@dirs) {
+            my $candidate = File::Spec->catdir($install_root, $d);
+            if (-d File::Spec->catdir($candidate, "bin")) {
+                $server_dir = $candidate;
+                last;
+            }
+        }
+
+        if (defined $server_dir) {
+            PrintVerbose($di."Flattening server directory: $server_dir");
+
+            opendir(my $sdh, $server_dir) or do {
+                PrintError($di."Unable to open server directory: $server_dir");
+                return undef;
+            };
+
+            while (my $item = readdir($sdh)) {
+                next if $item eq '.' || $item eq '..';
+
+                my $src = File::Spec->catdir($server_dir, $item);
+                my $dst = File::Spec->catdir($install_root, $item);
+
+                my $rc = system("mv", $src, $dst);
+                if ($rc != 0) {
+                    PrintError($di."Failed to move $src to $dst");
+                    closedir($sdh);
+                    return undef;
+                }
+            }
+
+            closedir($sdh);
+
+            rmdir($server_dir) or PrintWarning($di."Could not remove $server_dir");
+        }
+    }
+    ###########################################################################
 
     PrintVerbose($di."Unified install root = $install_root");
 
@@ -2473,13 +2638,15 @@ sub _CreateTempStagingDir {
     my ($ctx) = @_;
 
     my $base = $ctx->{options}{tmp_dir} ||= File::Spec->tmpdir();
-    return undef unless defined $base;
+    if (!defined $base) {
+        return undef;
+    }
 
     my $pid  = $$;
     my $time = time();
     my $dir  = File::Spec->catdir($base, "taf_unpack_${pid}_${time}");
 
-    unless (mkdir $dir) {
+    if (!mkdir $dir) {
         PrintError("DatabaseSoftwareInstalls::_CreateTempStagingDir -> Failed to create $dir");
         return undef;
     }
@@ -2522,19 +2689,33 @@ sub _CreateTempStagingDir {
 sub _CleanupTempUnpackDir {
     my ($ctx, $dir) = @_;
 
-    return unless defined $dir;
-    return unless -d $dir;
+    # Nothing to do if dir is undefined
+    if (!defined $dir) {
+        return OK;
+    }
+
+    # Nothing to do if dir does not exist
+    if (!-d $dir) {
+        return OK;
+    }
+
+    my $had_error = 0;
 
     eval {
         File::Path::remove_tree($dir, { error => \my $err });
+
         if (@$err) {
             for my $diag (@$err) {
                 my ($file, $message) = %$diag;
                 PrintError("DatabaseSoftwareInstalls::_CleanupTempUnpackDir -> Failed to remove '$file': $message");
-                return ERROR;
+                $had_error = 1;
             }
         }
     };
+
+    if ($had_error) {
+        return ERROR;
+    }
 
     return OK;
 }
@@ -2543,63 +2724,110 @@ sub _CleanupTempUnpackDir {
 # _NormalizeUsrLayout
 #
 # PURPOSE:
-#     Convert vendor-style usr/ layouts into a relocatable TAF install root by
-#     moving usr/<subdir> into top-level directories under the install root.
+#     Normalize RPM-style usr/ layouts into a single relocatable install root.
+#     Handles vendor bintars that contain usr/local/<product> as well as
+#     usr/ layouts containing bin, lib, share, include. Ensures that the final
+#     install_root contains a unified top-level tree.
 #
 # PARAMETERS:
-#     $ctx
-#         Context used for logging.
-#
 #     $install_root
-#         Unified install root produced by layered extraction.
+#         The unified install_root produced by _MergeTopLevelDirs().
+#
+#     $debug
+#         Boolean flag enabling verbose normalization diagnostics.
 #
 # BEHAVIOR:
-#     - Move usr/bin     -> bin
-#     - Move usr/sbin    -> sbin
-#     - Move usr/lib     -> lib
-#     - Move usr/lib64   -> lib64
-#     - Move usr/share   -> share
-#     - Move usr/include -> include
-#     - Abort immediately on the first failed move.
+#     - Detect usr/local/<product> and move its contents into install_root.
+#     - Detect usr/<product> layouts containing standard directories and move
+#       them into install_root.
+#     - Detect usr/ layouts containing bin, lib, share, include and move them.
+#     - Remove usr/ if empty after normalization.
+#     - Fail immediately on any filesystem error.
 #
 # RETURNS:
-#     OK     - All usr/ subdirectories normalized successfully.
-#     ERROR  - Any move operation failed.
+#     OK     - Normalization completed successfully.
+#     ERROR  - Any directory creation, move, or merge error.
 #
 # NOTES:
 #     - INTERNAL routine; not intended for external callers.
-#     - Normalization is mandatory; downstream components assume a usr-free,
-#       relocatable layout.
-#     - _MoveUsrSubdir() performs all filesystem operations and error reporting.
+#     - Wrapper-directory flattening is handled earlier in _MergeTopLevelDirs().
 #===============================================================================
 sub _NormalizeUsrLayout {
-    my ($ctx, $install_root) = @_;
+    my ($install_root, $debug) = @_;
 
-    my $rc;
+    if (!defined $install_root || !-d $install_root) {
+        PrintError("_NormalizeUsrLayout -> ERROR: install_root is invalid");
+        return ERROR;
+    }
 
-    # Move usr/bin   -> bin
-    $rc = _MoveUsrSubdir($ctx, $install_root, "bin");
-    return ERROR if $rc != OK;
+    my $usr = File::Spec->catdir($install_root, 'usr');
+    if (!-d $usr) {
+        return OK;
+    }
 
-    # Move usr/sbin  -> sbin
-    $rc = _MoveUsrSubdir($ctx, $install_root, "sbin");
-    return ERROR if $rc != OK;
+    #---------------------------------------------------------------------------
+    # Case 1: usr/local/<product>
+    #---------------------------------------------------------------------------
+    my $usr_local = File::Spec->catdir($usr, 'local');
+    if (-d $usr_local) {
 
-    # Move usr/lib   -> lib
-    $rc = _MoveUsrSubdir($ctx, $install_root, "lib");
-    return ERROR if $rc != OK;
+        opendir(my $dh, $usr_local) or do {
+            PrintError("_NormalizeUsrLayout -> ERROR: Unable to open $usr_local");
+            return ERROR;
+        };
 
-    # Move usr/lib64 -> lib64
-    $rc = _MoveUsrSubdir($ctx, $install_root, "lib64");
-    return ERROR if $rc != OK;
+        my @entries = grep { $_ ne '.' && $_ ne '..' } readdir($dh);
+        closedir($dh);
 
-    # Move usr/share -> share
-    $rc = _MoveUsrSubdir($ctx, $install_root, "share");
-    return ERROR if $rc != OK;
+        if (scalar(@entries) == 1) {
+            my $product_dir = File::Spec->catdir($usr_local, $entries[0]);
+            if (-d $product_dir) {
+                PrintVerbose("_NormalizeUsrLayout -> Moving usr/local/$entries[0] into install_root")
+                    if $debug;
 
-    # Move usr/include -> include (critical for headers)
-    $rc = _MoveUsrSubdir($ctx, $install_root, "include");
-    return ERROR if $rc != OK;
+                my $rc = _MoveUsrSubdir($product_dir, $install_root, $debug);
+                if ($rc != OK) {
+                    return ERROR;
+                }
+
+                File::Path::remove_tree($usr);
+                return OK;
+            }
+        }
+    }
+
+    #---------------------------------------------------------------------------
+    # Case 2: usr/<product> contains standard directories
+    #---------------------------------------------------------------------------
+    opendir(my $dh2, $usr) or do {
+        PrintError("_NormalizeUsrLayout -> ERROR: Unable to open $usr");
+        return ERROR;
+    };
+
+    my @usr_entries = grep { $_ ne '.' && $_ ne '..' } readdir($dh2);
+    closedir($dh2);
+
+    for my $e (@usr_entries) {
+        my $path = File::Spec->catdir($usr, $e);
+
+        if (-d $path && ($e eq 'bin' || $e eq 'lib' || $e eq 'share' || $e eq 'include')) {
+            PrintVerbose("_NormalizeUsrLayout -> Moving usr/$e into install_root") if $debug;
+
+            my $rc = _MoveUsrSubdir($path, $install_root, $debug);
+            if ($rc != OK) {
+                return ERROR;
+            }
+        }
+    }
+
+    # Remove usr if empty
+    opendir(my $dh3, $usr) or return OK;
+    my @remaining = grep { $_ ne '.' && $_ ne '..' } readdir($dh3);
+    closedir($dh3);
+
+    if (scalar(@remaining) == 0) {
+        File::Path::remove_tree($usr);
+    }
 
     return OK;
 }
@@ -2608,111 +2836,84 @@ sub _NormalizeUsrLayout {
 # _MoveUsrSubdir
 #
 # PURPOSE:
-#     Normalize a single usr/<subdir> directory into the top-level install
-#     root. Supports both straight moves and layered merges. Enforces the
-#     invariant that no usr/ hierarchy remains in the final install tree.
+#     Move the contents of a usr/ subdirectory (e.g., usr/local/mysql,
+#     usr/bin, usr/lib) into the top-level install_root. Used by
+#     _NormalizeUsrLayout() to flatten RPM-style layouts.
 #
 # PARAMETERS:
-#     $ctx
-#         Context containing options.tools_debug.
+#     $src
+#         Source directory under usr/ to move.
 #
 #     $install_root
-#         Unified install root being normalized.
+#         Destination install_root directory.
 #
-#     $subdir
-#         Name of the usr/<subdir> directory (for example, bin, lib, lib64).
+#     $debug
+#         Boolean flag enabling verbose move diagnostics.
 #
 # BEHAVIOR:
-#     - Identify source:      <install_root>/usr/<subdir>
-#     - Identify destination: <install_root>/<subdir>
-#     - If source does not exist, subdir is already normalized -> OK.
-#     - If destination does not exist, perform a straight move.
-#     - If destination exists, perform a layered merge:
-#           * If both sides are directories -> merge via _MergeTree().
-#           * If destination is a file -> conflict -> ERROR.
-#           * Otherwise -> rename source entry into destination.
-#     - Attempt to remove the now-empty source directory (non-fatal).
-#     - Emit verbose logging for all operations.
+#     - Ensure the source directory exists.
+#     - Enumerate all entries under the source directory.
+#     - Move each entry into install_root, merging directories as needed.
+#     - Use _MergeTree() for directory merges.
+#     - Remove the source directory after successful move.
+#     - Fail immediately on any filesystem error.
 #
 # RETURNS:
-#     OK     - Subdirectory normalized successfully.
-#     ERROR  - Any move, merge, conflict, or filesystem error.
+#     OK     - Move completed successfully.
+#     ERROR  - Any directory creation, merge, or move error.
 #
 # NOTES:
 #     - INTERNAL routine; not intended for external callers.
-#     - Atomic unit of usr/ normalization; _NormalizeUsrLayout() orchestrates
-#       the required sequence.
-#     - Layered merge behavior is deterministic; conflicts are always fatal.
-#     - Logging routed through PrintVerbose(), PrintError(), and PrintWarning().
+#     - Does not flatten wrapper directories; only usr/ layouts.
 #===============================================================================
 sub _MoveUsrSubdir {
-    my ($ctx, $install_root, $subdir) = @_;
+    my ($src, $install_root, $debug) = @_;
 
-    my $src = "$install_root/usr/$subdir";
-    my $dst = "$install_root/$subdir";
-
-    # No source -> nothing to normalize for this subdir
-    return OK unless -d $src;
-
-    my $debug = $ctx->{options}{tools_debug} || 0;
-
-    # If destination does not exist yet, a straight move is fine
-    unless (-d $dst) {
-        PrintVerbose("NormalizeUsrLayout -> Moving $src -> $dst");
-
-        my $rc = toolsLib::MV($src, $dst, $debug);
-        if ($rc != OK) {
-            PrintError("NormalizeUsrLayout -> Move failed for $src -> $dst");
-            return ERROR;
-        }
-
-        return OK;
+    if (!-d $src) {
+        PrintError("_MoveUsrSubdir -> ERROR: Source directory does not exist: $src");
+        return ERROR;
     }
 
-    # Destination exists -> layered merge scenario; merge contents
-    PrintVerbose("NormalizeUsrLayout: merging $src -> $dst");
-
     opendir(my $dh, $src) or do {
-        PrintError("NormalizeUsrLayout -> Failed to open source dir $src: $!");
+        PrintError("_MoveUsrSubdir -> ERROR: Unable to open $src");
         return ERROR;
     };
 
     my @entries = grep { $_ ne '.' && $_ ne '..' } readdir($dh);
-    closedir $dh;
+    closedir($dh);
 
-    for my $entry (@entries) {
-        my $from = "$src/$entry";
-        my $to   = "$dst/$entry";
+    for my $e (@entries) {
+        my $src_path = File::Spec->catdir($src, $e);
+        my $dst_path = File::Spec->catdir($install_root, $e);
 
-        # If destination exists, decide how to handle it
-        if (-e $to) {
-        
-            # Case 1: both are directories -> merge them
-            if (-d $from && -d $to) {
-                my $rc = _MergeTree($from, $to, $debug);
-                return ERROR if $rc != OK;
-                next;
+        if (-d $src_path) {
+            PrintVerbose("_MoveUsrSubdir -> Merging directory $src_path -> $dst_path") if $debug;
+
+            my $rc = _MergeTree($src_path, $dst_path, $debug);
+            if ($rc != OK) {
+                return ERROR;
             }
-        
-            # Case 2: destination exists but is a file -> conflict
-            PrintError("NormalizeUsrLayout -> Conflict merging $from -> $to (target already exists)");
-            return ERROR;
-        }
-        
-        # Destination does not exist -> simple rename
-        unless (rename($from, $to)) {
-            PrintError("NormalizeUsrLayout -> Failed to move $from -> $to: $!");
-            return ERROR;
-        }
 
+        } elsif (-f $src_path) {
+            PrintVerbose("_MoveUsrSubdir -> Moving file $src_path -> $dst_path") if $debug;
+
+            if (!File::Copy::copy($src_path, $dst_path)) {
+                PrintError("_MoveUsrSubdir -> ERROR: Failed to copy $src_path -> $dst_path: $!");
+                return ERROR;
+            }
+
+            my $mode = (stat($src_path))[2];
+            if (defined $mode) {
+                $mode &= 07777;
+                chmod $mode, $dst_path;
+            }
+
+        } else {
+            PrintVerbose("_MoveUsrSubdir -> Skipping non-regular entry: $src_path") if $debug;
+        }
     }
 
-    # Attempt to remove now-empty source directory
-    if (!rmdir $src) {
-        # Not fatal, but log it explicitly
-        PrintVerbose("NormalizeUsrLayout: leaving $src (contains additional content)");
-    }
-
+    File::Path::remove_tree($src);
     return OK;
 }
 
@@ -2753,15 +2954,31 @@ sub _CollectTopLevelDirs {
     my @dirs;
 
     for my $entry (@entries) {
-        next unless -d $entry;
+
+        # Skip tarballs (MySQL bundle inner archives)
+        if ($entry =~ /\.(tar|tar\.gz|tar\.xz|tgz)$/) {
+            next;
+        }
+
+        # Must be a directory
+        if (!-d $entry) {
+            next;
+        }
+
         # Skip the unified root if it already exists (defensive)
-        next if File::Basename::basename($entry) eq 'install_root';
+        my $base = File::Basename::basename($entry);
+        if ($base eq 'install_root') {
+            next;
+        }
+
         push @dirs, $entry;
     }
 
     if ($debug) {
         PrintVerbose("_CollectTopLevelDirs -> Found top-level dirs:");
-        PrintVerbose("  $_") for @dirs;
+        for my $d (@dirs) {
+            PrintVerbose("  $d");
+        }
     }
 
     return @dirs;
@@ -2787,10 +3004,10 @@ sub _CollectTopLevelDirs {
 #
 # BEHAVIOR:
 #     - Create a fresh install_root directory under the staging root.
-#     - Iterate through each top-level directory discovered by
-#       _CollectTopLevelDirs().
-#     - Merge each directory into install_root via _MergeTree().
-#     - Emit verbose logging when merge debugging is enabled.
+#     - For each top-level directory:
+#           * Detect wrapper directories (e.g., mariadb-11.x.y-prof)
+#           * If wrapper detected, merge its contents instead of the wrapper
+#           * Otherwise merge the directory as-is
 #     - Fail immediately on any merge error; no partial merges allowed.
 #
 # RETURNS:
@@ -2807,27 +3024,59 @@ sub _MergeTopLevelDirs {
     my ($stage_root, $dirs_ref, $debug) = @_;
 
     my @dirs = @$dirs_ref;
-    return undef unless @dirs;
+
+    # No directories to merge
+    if (!@dirs) {
+        return undef;
+    }
 
     # Create a fresh, empty unified install_root
     my $install_root = File::Spec->catdir($stage_root, 'install_root');
 
-    unless (-d $install_root) {
-        mkdir $install_root or do {
+    if (!-d $install_root) {
+        if (!mkdir $install_root) {
             PrintVerbose("_MergeTopLevelDirs -> ERROR: Unable to create install_root: $install_root");
             return undef;
-        };
+        }
     }
 
     # Merge each top-level directory into install_root
     for my $dir (@dirs) {
-        if ($debug) {
-            PrintVerbose("_MergeTopLevelDirs -> Merging $dir -> $install_root");
+
+        my $src = $dir;
+
+        # Detect wrapper directory (e.g., mariadb-11.x.y-prof)
+        if (opendir(my $dh, $dir)) {
+
+            my @entries = grep { $_ ne '.' && $_ ne '..' } readdir($dh);
+            closedir($dh);
+
+            # If exactly one subdirectory exists, treat it as a wrapper
+            if (@entries == 1) {
+                my $candidate = File::Spec->catdir($dir, $entries[0]);
+
+                if (-d $candidate) {
+                    $src = $candidate;
+
+                    if ($debug) {
+                        PrintVerbose("_MergeTopLevelDirs -> Flattening wrapper directory: $dir -> $src");
+                    }
+                }
+            }
+
+        } else {
+            PrintVerbose("_MergeTopLevelDirs -> ERROR: Unable to open directory: $dir");
+            return undef;
         }
 
-        my $rc = _MergeTree($dir, $install_root, $debug);
-        unless ($rc == OK) {
-            PrintVerbose("_MergeTopLevelDirs -> ERROR: Merge failed for $dir -> $install_root");
+        if ($debug) {
+            PrintVerbose("_MergeTopLevelDirs -> Merging $src -> $install_root");
+        }
+
+        my $rc = _MergeTree($src, $install_root, $debug);
+
+        if ($rc != OK) {
+            PrintVerbose("_MergeTopLevelDirs -> ERROR: Merge failed for $src -> $install_root");
             return undef;
         }
     }
@@ -2880,7 +3129,7 @@ sub _MergeTree {
     my ($src, $dst, $debug) = @_;
 
     # Ensure destination exists
-    unless (-d $dst) {
+    if (!-d $dst) {
         mkdir $dst or do {
             PrintVerbose("_MergeTree -> ERROR: Unable to create dest dir: $dst");
             return ERROR;
@@ -2902,7 +3151,9 @@ sub _MergeTree {
         if (-d $src_path) {
             # Recurse into subdirectories
             my $rc = _MergeTree($src_path, $dst_path, $debug);
-            return ERROR unless $rc == OK;
+            if ($rc != OK) {
+                return ERROR;
+            }
 
         } elsif (-f $src_path) {
             # File: copy, preserving mode bits
@@ -2911,7 +3162,7 @@ sub _MergeTree {
             }
 
             # Copy file contents
-            unless (File::Copy::copy($src_path, $dst_path)) {
+            if (!File::Copy::copy($src_path, $dst_path)) {
                 PrintVerbose("_MergeTree -> ERROR: copy failed for $src_path -> $dst_path: $!");
                 return ERROR;
             }
@@ -2920,7 +3171,7 @@ sub _MergeTree {
             my $mode = (stat($src_path))[2];
             if (defined $mode) {
                 $mode &= 07777;  # keep permission bits only
-                unless (chmod $mode, $dst_path) {
+                if (!chmod $mode, $dst_path) {
                     PrintVerbose("_MergeTree -> WARNING: Failed to preserve mode on $dst_path: $!");
                 }
             }
@@ -2973,7 +3224,7 @@ sub _SelectInstallToUpdate {
 
     # List installs
     my @installs = _GetListOfInstalls($ctx);
-    unless (@installs) {
+    if (!@installs) {
         PrintError("No installs found under $dirs_ref->{db_installs_root_dir}");
         return undef;
     }
@@ -3091,14 +3342,16 @@ sub _StageAndValidateUpdatePackages {
             ? "$ex_maj.$ex_min.$ex_pat"
             : undef;
 
-    unless (defined $existing_maker && defined $existing_version) {
+    if (!(defined $existing_maker && defined $existing_version)) {
         PrintError("Unable to infer maker/version from existing install: $target");
         return undef;
     }
 
     # Validate package list
     my @packages = _ValidateInstallPackageList($ctx);
-    return undef unless @packages;
+    if (!@packages) {
+        return undef;
+    }
 
     # Infer maker + version (x.x.x) from BASE PACKAGE FILENAME
     my $base_pkg  = _SelectBasePackage(\@packages);
@@ -3131,8 +3384,8 @@ sub _StageAndValidateUpdatePackages {
     # HARD STOP: exact version mismatch (x.x.x)
     if (defined $existing_version && defined $new_version) {
 
-        unless (defined $ex_maj && defined $ex_min && defined $ex_pat &&
-                defined $nw_maj && defined $nw_min && defined $nw_pat) {
+        if (!(defined $ex_maj && defined $ex_min && defined $ex_pat &&
+              defined $nw_maj && defined $nw_min && defined $nw_pat)) {
 
             PrintError("Unable to extract full x.x.x version from install or package");
             Print("Update aborted.");
@@ -3196,7 +3449,7 @@ sub _ApplyUpdateToInstall {
 
     # Merge staged update into existing install (non-destructive)
     my $merge_rc = _MergeTree($install_root, $target, $debug);
-    unless ($merge_rc == OK) {
+    if (!($merge_rc == OK)) {
         PrintError("\n\tFailed to merge updated files into $target");
         return ERROR;
     }
@@ -3244,7 +3497,7 @@ sub _DetermineExistingMaker {
     my ($target) = @_;
 
     my $maker = _ResolveInstallType($target);
-    unless (defined $maker) {
+    if (!defined $maker) {
         PrintError("Unable to determine database maker for $target");
         return undef;
     }
@@ -3288,20 +3541,20 @@ sub _StagePackages {
     my ($ctx, $packages_ref) = @_;
 
     my $tmp = _CreateTempStagingDir($ctx);
-    unless ($tmp) {
+    if (!$tmp) {
         PrintError("Failed to create temporary staging directory");
         return undef;
     }
 
     my $stage_root = _UnpackBasePackage($ctx, $tmp, $packages_ref);
-    unless ($stage_root) {
+    if (!$stage_root) {
         PrintError("Failed to unpack base package");
         _CleanupTempUnpackDir($ctx, $tmp);
         return undef;
     }
 
     my $install_root = _UnpackLayeredPackages($ctx, $stage_root, $packages_ref);
-    unless ($install_root && -d $install_root) {
+    if (!($install_root && -d $install_root)) {
         PrintError("Failed to unpack layered packages");
         _CleanupTempUnpackDir($ctx, $tmp);
         return undef;
@@ -3404,7 +3657,9 @@ sub _ValidateStagedUpdate {
 sub _InferMakerAndVersionFromInstallDir {
     my ($path) = @_;
 
-    return (undef, undef) unless defined $path;
+    if (!defined $path) {
+        return (undef, undef);
+    }
 
     my $base = File::Basename::basename($path);
     my $n = lc($base);
@@ -3464,11 +3719,19 @@ sub _InstallMatchesMakerAndVersion {
     my ($inst_maker, $inst_major_minor) =
         _InferMakerAndVersionFromInstallDir($install_path);
 
-    return 0 unless defined $inst_maker;
-    return 0 unless defined $inst_major_minor;
+    if (!defined $inst_maker) {
+        return 0;
+    }
+    if (!defined $inst_major_minor) {
+        return 0;
+    }
 
-    return 0 unless $rpm_maker eq $inst_maker;
-    return 0 unless $rpm_major_minor eq $inst_major_minor;
+    if (!($rpm_maker eq $inst_maker)) {
+        return 0;
+    }
+    if (!($rpm_major_minor eq $inst_major_minor)) {
+        return 0;
+    }
 
     return 1;
 }
@@ -3511,7 +3774,9 @@ sub _MaybeWarnAboutExistingInstalls {
     my ($ctx, $rpm_maker, $rpm_major_minor) = @_;
 
     my @installs = _ListDatabaseSoftwareInstalls($ctx);
-    return unless @installs;
+    if (!@installs) {
+        return;
+    }
 
     for my $path (@installs) {
         if (_InstallMatchesMakerAndVersion($rpm_maker, $rpm_major_minor, $path)) {
@@ -3570,7 +3835,7 @@ sub _PerformInstallValidations {
     my $raw         = $options_ref->{db_software_install_packages};
 
     # Ensure raw package spec is present
-    unless (defined $raw && length $raw) {
+    if (!(defined $raw && length $raw)) {
         PrintError("Install validation failed: no install packages provided in options.db_software_install_packages");
         return ();
     }
@@ -3580,13 +3845,15 @@ sub _PerformInstallValidations {
     my @expanded;
 
     for my $token (@tokens) {
-        next unless defined $token && length $token;
+        if (!(defined $token && length $token)) {
+            next;
+        }
 
         # Wildcard pattern -> expand via glob()
         if ($token =~ /[*?\[]/) {
             my @globbed = glob($token);
 
-            unless (@globbed) {
+            if (!@globbed) {
                 PrintError("Install validation failed: wildcard did not match any files: $token");
                 return ();
             }
@@ -3599,7 +3866,7 @@ sub _PerformInstallValidations {
         }
     }
 
-    unless (@expanded) {
+    if (!@expanded) {
         PrintError("Install validation failed: no usable package paths after expansion");
         return ();
     }
@@ -3608,12 +3875,12 @@ sub _PerformInstallValidations {
     my @validated;
 
     for my $pkg (@expanded) {
-        unless (-e $pkg) {
+        if (!(-e $pkg)) {
             PrintError("Install validation failed: install package not found: $pkg");
             return ();
         }
 
-        unless (-r $pkg) {
+        if (!(-r $pkg)) {
             PrintError("Install validation failed: install package not readable: $pkg");
             return ();
         }
@@ -3621,7 +3888,7 @@ sub _PerformInstallValidations {
         push @validated, $pkg;
     }
 
-    unless (@validated) {
+    if (!@validated) {
         PrintError("Install validation failed: no valid install packages after checks");
         return ();
     }
@@ -3640,91 +3907,96 @@ sub _PerformInstallValidations {
 # _PerformInstallExtraction
 #
 # PURPOSE:
-#     Execute the full extraction phase of a database software install: create
-#     a staging directory, unpack all packages, detect the resulting layout
-#     (tarball vs. RPM-style), normalize when required, and return a unified
-#     install_root. Cleanup of the staging directory is delegated to the caller.
+#     Orchestrate the complete extraction pipeline for database software
+#     installs. This routine performs base unpack, layered unpack (including
+#     merge into a unified install_root), optional inner-tarball scanning, and
+#     usr/ normalization, and returns a fully normalized install_root ready for
+#     finalization.
 #
 # PARAMETERS:
 #     $ctx
-#         Context containing options.tmp_dir, verbosity flags, and paths.
+#         Full TAF context hashref.
 #
 #     $packages_ref
-#         Arrayref of package paths; the first resolved package is treated as
-#         the base package.
+#         Arrayref of package paths in caller-specified order.
 #
 # BEHAVIOR:
-#     - Create a unique temporary staging directory.
-#     - Unpack the base package into the staging root.
-#     - Layer additional packages on top of the base tree.
-#     - Promote nested tarball roots when present.
-#     - Detect install layout using known server executable candidates:
-#           * Tarball layout: server binary found under bin/ and not under
-#             usr/bin/.
-#           * RPM layout: server binary found under usr/bin/, requiring
-#             usr/ -> root normalization.
-#     - Normalize usr/ layout only for RPM-style installs.
-#     - Return (tmp_staging_dir, install_root) on success.
+#     - Create a temporary staging directory.
+#     - Unpack the base package into the staging directory.
+#     - Unpack layered packages on top of the base and let
+#       _UnpackLayeredPackages() produce the unified install_root.
+#     - Scan for nested tarballs only if they actually exist.
+#     - Normalize usr/ layouts into a relocatable install tree.
+#     - Return both the staging directory and the final install_root.
+#     - Fail immediately on any error; no partial installs are permitted.
 #
 # RETURNS:
-#     ($tmp, $install_root)
-#         $tmp          - Temporary staging directory (caller must clean up).
-#         $install_root - Final install tree (tarball or normalized RPM).
+#     ($stage_root, $install_root)
+#         Both defined and valid directories on success.
 #
 #     (undef, undef)
-#         If any step fails. The caller is responsible for cleaning up $tmp
-#         when defined.
+#         On any failure.
 #
 # NOTES:
 #     - INTERNAL routine; not intended for external callers.
-#     - No cleanup of the staging directory occurs here; ownership belongs
-#       to DoInstall.
-#     - Layout detection is generic and based solely on known server
-#       executable names, not vendor-specific assumptions.
+#     - All filesystem operations must be deterministic and logged.
 #===============================================================================
 sub _PerformInstallExtraction {
     my ($ctx, $packages_ref) = @_;
 
+    #---------------------------------------------------------------------------
     # Create staging directory
-    my $tmp = _CreateTempStagingDir($ctx);
-    unless ($tmp && -d $tmp) {
-        PrintError("Install extraction failed: could not create temporary staging directory");
+    #---------------------------------------------------------------------------
+    my $stage_root = _CreateTempStagingDir($ctx);
+    if (!defined $stage_root || !-d $stage_root) {
+        PrintError("_PerformInstallExtraction -> ERROR: Failed to create staging directory");
         return (undef, undef);
     }
 
-    # Unpack base package (server, bundle, or client-only)
-    my $stage_root = _UnpackBasePackage($ctx, $tmp, $packages_ref);
-    unless ($stage_root && -d $stage_root) {
-        PrintError("Install extraction failed: base package could not be unpacked");
-        return ($tmp, undef);
+    #---------------------------------------------------------------------------
+    # Unpack base package (content-based selection inside helper)
+    #---------------------------------------------------------------------------
+    my $base_root = _UnpackBasePackage($ctx, $stage_root, $packages_ref);
+    if (!defined $base_root || !-d $base_root) {
+        PrintError("_PerformInstallExtraction -> ERROR: Base package unpack failed");
+        return (undef, undef);
     }
 
-    # Layer additional packages
+    #---------------------------------------------------------------------------
+    # Always run layered/merge phase to produce a unified install_root,
+    # even if there is only a single package. This collapses wrapper dirs
+    # and gives us the real install_root under the staging tree.
+    #---------------------------------------------------------------------------
     my $install_root = _UnpackLayeredPackages($ctx, $stage_root, $packages_ref);
-    unless ($install_root && -d $install_root) {
-        PrintError("Install extraction failed: layered packages did not produce a valid install_root");
-        return ($tmp, undef);
+    if (!defined $install_root || !-d $install_root) {
+        PrintError("_PerformInstallExtraction -> ERROR: Layered package unpack/merge failed");
+        return (undef, undef);
     }
 
-    # Promote nested tarball root (MariaDB tar.gz case)
-    $install_root = _PromoteNestedTarballRoot($install_root);
-
-    my @server_candidates = TAF::Utilities::AllKnownDBExecutables();
-    
-    # Detect tarball layout (bin/ at root)
-    for my $srv (@server_candidates) {
-        if (-x "$install_root/bin/$srv" && ! -x "$install_root/usr/bin/$srv") {
-            return ($tmp, $install_root);
-        }
+    #---------------------------------------------------------------------------
+    # Scan for nested tarballs (content-based, safe)
+    #   - Operate on the unified install_root so any inner archives are
+    #     expanded into the final tree before usr/ normalization.
+    #---------------------------------------------------------------------------
+    my $rc = _ScanAndUnpackInnerTarballs($ctx, $install_root);
+    if ($rc != OK) {
+        PrintError("_PerformInstallExtraction -> ERROR: Inner-tarball scan failed");
+        return (undef, undef);
     }
 
-    # Normalize usr/ layout for both server and client-only installs
-    unless (_NormalizeUsrLayout($ctx, $install_root) == OK) {
-        PrintError("Install extraction failed: usr/ normalization step returned ERROR");
-        return ($tmp, undef);
+    #---------------------------------------------------------------------------
+    # Normalize usr/ layout
+    #---------------------------------------------------------------------------
+    $rc = _NormalizeUsrLayout($install_root, $ctx->{options}->{tools_debug});
+    if ($rc != OK) {
+        PrintError("_PerformInstallExtraction -> ERROR: usr/ normalization failed");
+        return (undef, undef);
     }
 
-    return ($tmp, $install_root);
+    #---------------------------------------------------------------------------
+    # Success
+    #---------------------------------------------------------------------------
+    return ($stage_root, $install_root);
 }
 
 #===============================================================================
@@ -3767,15 +4039,21 @@ sub _PromoteNestedTarballRoot {
     closedir($dh);
 
     # Only promote if exactly one entry exists
-    return $root unless @entries == 1;
+    if (!(@entries == 1)) {
+        return $root;
+    }
 
     my $sub = File::Spec->catdir($root, $entries[0]);
 
     # Only promote if that entry is a directory
-    return $root unless -d $sub;
+    if (!(-d $sub)) {
+        return $root;
+    }
 
     # Only promote if it contains bin/
-    return $root unless -d File::Spec->catdir($sub, 'bin');
+    if (!(-d File::Spec->catdir($sub, 'bin'))) {
+        return $root;
+    }
 
     # Promote the nested directory
     return $sub;
@@ -3821,13 +4099,13 @@ sub _PerformInstallFinalization {
 
     # Move staged install to final dir
     my $final_dir = _MoveStagedInstallToFinalDir($ctx, $install_root, $packages_ref);
-    unless ($final_dir && -d $final_dir) {
+    if (!($final_dir && -d $final_dir)) {
         PrintError("Install finalization failed: unable to move staged install to final directory");
         return ERROR;
     }
 
     # Set active install
-    unless (_SetActiveInstallWrapper($ctx, $final_dir) == OK) {
+    if (!(_SetActiveInstallWrapper($ctx, $final_dir) == OK)) {
         PrintError("Install finalization failed: could not update active install marker");
         return ERROR;
     }
@@ -3952,15 +4230,15 @@ sub _SelectBasePackage {
 
     my @packages = @$packages_ref;
 
-    # Bundle detection (tar/tgz)
+    # Bundle detection: outer tar files only
     for my $pkg (@packages) {
         if ($pkg =~ /\.(tar|tgz|tar\.gz)$/) {
-            PrintVerbose("_SelectBasePackage -> bundle detected: $pkg");
+            #PrintVerbose("_SelectBasePackage -> bundle detected: $pkg");
             return $pkg;
         }
     }
 
-    # Known server binaries (maker-agnostic)
+    # Known server binaries
     my @server_bins = (
         'mysqld',
         'mariadbd',
@@ -3988,7 +4266,11 @@ sub _SelectBasePackage {
 
         if ($pkg =~ /\.rpm$/) {
             @files = `rpm2cpio '$pkg' | cpio -t 2>/dev/null`;
-        } elsif ($pkg =~ /\.(tar|tgz|tar\.gz)$/) {
+        }
+        elsif ($pkg =~ /\.(tar|tgz|tar\.gz)$/) {
+            @files = `tar -tf '$pkg' 2>/dev/null`;
+        }
+        elsif ($pkg =~ /\.(tar\.xz|txz|xz)$/) {
             @files = `tar -tf '$pkg' 2>/dev/null`;
         }
 
@@ -4001,7 +4283,7 @@ sub _SelectBasePackage {
         my @files = $list_pkg->($pkg);
 
         for my $bin (@server_bins) {
-            if (grep { /$bin$/ } @files) {
+            if (grep { /\/$bin$/ } @files) {
                 PrintVerbose("_SelectBasePackage -> server-capable package: $pkg (found $bin)");
                 return $pkg;
             }
@@ -4016,11 +4298,15 @@ sub _SelectBasePackage {
         my $has_client_lib = 0;
 
         for my $bin (@client_bins) {
-            $has_client_bin = 1 if grep { /$bin$/ } @files;
+            if (grep { /\/$bin$/ } @files) {
+                $has_client_bin = 1;
+            }
         }
 
         for my $lib (@client_libs) {
-            $has_client_lib = 1 if grep { /$lib/ } @files;
+            if (grep { /$lib/ } @files) {
+                $has_client_lib = 1;
+            }
         }
 
         if ($has_client_bin && $has_client_lib) {
@@ -4068,7 +4354,9 @@ sub _SelectBasePackage {
 #===============================================================================
 sub _InferMakerAndVersionFromFilename {
     my ($path) = @_;
-    return (undef, undef) unless defined $path;
+    if (!defined $path) {
+        return (undef, undef);
+    }
 
     # Strip directory and lowercase
     my $file = File::Basename::basename($path);
@@ -4186,24 +4474,24 @@ sub _WarnAboutStaleStagingDirs {
 
     # Determine scan root
     my $tmp_root = $ctx->{options}{tmp_dir};
-    unless (defined $tmp_root && -d $tmp_root) {
+    if (!(defined $tmp_root && -d $tmp_root)) {
         $tmp_root = File::Spec->tmpdir();
     }
 
     # Open directory safely
     my $dh;
-    unless (opendir($dh, $tmp_root)) {
+    if (!opendir($dh, $tmp_root)) {
         PrintWarning("Could not scan temporary directory for stale staging dirs: $tmp_root");
         return 0;
     }
 
     my @stale;
 
-    while (my $entry = readdir($dh)) {
-        next unless $entry =~ /^taf_unpack_/;
+     while (my $entry = readdir($dh)) {
+        next if !($entry =~ /^taf_unpack_/);
 
         my $full = File::Spec->catdir($tmp_root, $entry);
-        next unless -d $full;
+        next if !(-d $full);
 
         push @stale, $full;
     }
@@ -4212,16 +4500,16 @@ sub _WarnAboutStaleStagingDirs {
 
     # Emit warnings
     if (@stale) {
-    
+
         # First line: PW
         PrintVerbose("");
         PrintWarning("\n\tDetected stale TAF staging directories under $tmp_root:\n");
-    
+
         # Subsequent lines: PV
         for my $dir (@stale) {
             PrintVerbose("\t  - $dir");
         }
-    
+
         PrintVerbose("\n\tThese may indicate an interrupted or failed install/update operation.");
         PrintVerbose("\tThey are not removed automatically.\n");
     }
@@ -4297,6 +4585,155 @@ sub _RemoveAllDatabaseSoftwareInstall {
     }
 
     Print("\nAll database software installs have been removed.\n");
+    return OK;
+}
+
+#===============================================================================
+# _AdjustInstallRootForUsrLayout
+#
+# PURPOSE:
+#     Detect vendor tarballs that unpack into a top-level usr/ layout
+#     (for example: usr/bin, usr/lib, usr/lib64) and treat usr/ as the
+#     effective install_root. This allows downstream normalization logic
+#     to operate on the real tree rather than the wrapper directory.
+#
+# PARAMETERS:
+#     $install_root
+#         Directory produced by extraction and any nested-root promotion.
+#         This is the candidate install_root that may require adjustment.
+#
+# BEHAVIOR:
+#     - Validate that install_root exists and is a directory.
+#     - Check for a usr/ subdirectory directly under install_root.
+#     - If usr/ exists and contains at least one standard top-level
+#       directory (bin, lib, or lib64), treat usr/ as the true root.
+#     - Otherwise, return the original install_root unchanged.
+#
+# RETURNS:
+#     <string>  - Adjusted install_root (pointing at .../usr) when a
+#                 usr-based layout is detected.
+#     <string>  - Original install_root when no adjustment is required.
+#
+# NOTES:
+#     - INTERNAL routine; not intended for external callers.
+#     - This adjustment is intentionally conservative: usr/ must contain
+#       at least one standard directory before promotion occurs.
+#     - This routine does not perform any filesystem moves; it only
+#       selects the correct logical root for subsequent normalization.
+#===============================================================================
+sub _AdjustInstallRootForUsrLayout {
+    my ($install_root) = @_;
+
+    if (!(defined $install_root && -d $install_root)) {
+        return $install_root;
+    }
+
+    my $usr_dir = File::Spec->catdir($install_root, 'usr');
+
+    # Only adjust if usr/ exists and contains at least one of the expected
+    # subdirectories we normalize later.
+    if (-d $usr_dir) {
+        my $has_bin   = -d File::Spec->catdir($usr_dir, 'bin');
+        my $has_lib   = -d File::Spec->catdir($usr_dir, 'lib');
+        my $has_lib64 = -d File::Spec->catdir($usr_dir, 'lib64');
+
+        if ($has_bin || $has_lib || $has_lib64) {
+            return $usr_dir;
+        }
+    }
+
+    return $install_root;
+}
+
+#===============================================================================
+# _ScanAndUnpackInnerTarballs
+#
+# PURPOSE:
+#     Recursively scan a staging root for nested tar archives (tar, tar.gz,
+#     tar.xz) and unpack them into the same tree. This is required only for
+#     distributions that intentionally ship secondary tarballs (e.g. MySQL
+#     bundle tarballs containing server.tar.xz, router.tar.gz, etc.).
+#
+# PARAMETERS:
+#     $ctx
+#         Full TAF context hashref.
+#
+#     $root
+#         Root directory of the current staging tree.
+#
+# BEHAVIOR:
+#     - Recursively discover nested tar archives.
+#     - If none found, return OK immediately (simple bintar).
+#     - For each archive:
+#           * Create a temporary unpack directory.
+#           * Extract the archive into the temporary directory.
+#           * Merge the extracted tree into the archive's parent directory.
+#           * Remove the temporary directory.
+#           * Remove the original archive file.
+#     - Fail immediately on any extraction or merge error.
+#
+# RETURNS:
+#     OK     - All nested archives processed (or none found).
+#     ERROR  - Any extraction or merge failure.
+#
+# NOTES:
+#     - INTERNAL routine; not intended for external callers.
+#     - Simple bintars (MariaDB, MySQL, Percona) contain no nested archives.
+#     - Bundle tarballs contain nested archives and must be unpacked.
+#===============================================================================
+sub _ScanAndUnpackInnerTarballs {
+    my ($ctx, $root) = @_;
+
+    if (!defined $root || !-d $root) {
+        return OK;
+    }
+
+    #---------------------------------------------------------------------------
+    # Discover nested tar archives by actual content, not by maker.
+    #---------------------------------------------------------------------------
+    my @archives;
+    File::Find::find(
+        sub {
+            if (-f $_) {
+                if ($_ =~ /\.(tar|tar\.gz|tar\.xz)$/) {
+                    push @archives, $File::Find::name;
+                }
+            }
+        },
+        $root
+    );
+
+    # No inner tarballs -> simple bintar -> do nothing
+    if (scalar(@archives) == 0) {
+        return OK;
+    }
+
+    #---------------------------------------------------------------------------
+    # Process each nested archive
+    #---------------------------------------------------------------------------
+    for my $archive (@archives) {
+
+        my $parent = File::Basename::dirname($archive);
+        my $tmpdir = File::Spec->catdir($parent, '.inner_unpack_tmp');
+
+        File::Path::mkpath($tmpdir);
+
+        my $rc = toolsLib::ExtractArchive($archive, $tmpdir);
+        if ($rc != 0) {
+            PrintError(TAF_DBSI."_ScanAndUnpackInnerTarballs -> ERROR: Failed to extract $archive");
+            return ERROR;
+        }
+
+        $rc = _MergeTree($tmpdir, $parent, $ctx->{options}->{tools_debug});
+        if ($rc != OK) {
+            PrintError(TAF_DBSI."_ScanAndUnpackInnerTarballs -> ERROR: Merge failed for $archive");
+            return ERROR;
+        }
+
+        File::Path::remove_tree($tmpdir);
+        unlink $archive;
+    }
+
     return OK;
 }
 

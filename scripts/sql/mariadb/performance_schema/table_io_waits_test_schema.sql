@@ -1,0 +1,8 @@
+SELECT OBJECT_SCHEMA,
+       OBJECT_NAME,
+       COUNT_READ,
+       COUNT_WRITE,
+       SUM_TIMER_WAIT
+FROM performance_schema.table_io_waits_summary_by_table
+WHERE OBJECT_SCHEMA='test'
+ORDER BY SUM_TIMER_WAIT DESC;   

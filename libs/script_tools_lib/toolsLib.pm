@@ -3,10 +3,23 @@ package toolsLib;
 # toolsLib
 #
 # Created: August 2025
-# Last Modified: January 2026
+# Last Modified: March 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -90,7 +103,7 @@ require SecureCopy;
 require ClientCmakeBuild;
 
 # Constants and globals
-our $VERSION = '2.0';
+our $VERSION = '2.5';
 our @EXPORT = (
     #--- Build / Client ---
     qw(
@@ -100,6 +113,7 @@ our @EXPORT = (
     #--- FileOps (copy/move/delete/list) ---
     qw(
         CopyContents
+        CopyDirContents
         CopyRecursive
         CopyRecursiveFromCurrent
         DeleteFilesWExt
@@ -718,6 +732,40 @@ sub CopyRecursive {
     DebugPrint("toolsLib::CopyRecursive: base = $base, target = $target");
     return FileOps::CopyR($base, $target, $debug);
 }
+
+sub CopyDirContents {
+    my ($base, $target, $debug) = @_;
+
+    # Ensure destination exists
+    unless (-d $target) {
+        mkdir $target or return ERROR;
+    }
+
+    opendir(my $dh, $base) or return ERROR;
+
+    while (my $entry = readdir($dh)) {
+
+        next if $entry eq "." or $entry eq "..";
+
+        # Skip system directories like lost+found
+        next if $entry eq "lost+found";
+
+        my $from = "$base/$entry";
+        my $to   = "$target/$entry";
+
+        my $cmd = "cp -a $from $to";
+        DebugPrint("CopyDirContents: $cmd") if $debug;
+
+        if (system($cmd) != 0) {
+            closedir($dh);
+            return ERROR;
+        }
+    }
+
+    closedir($dh);
+    return OK;
+}
+
 
 sub CopyRecursiveFromCurrent {
     my ($target, $debug) = @_;

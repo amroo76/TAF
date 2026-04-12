@@ -93,10 +93,53 @@ Note: setup-client
                    : Path to cmake (client builds).
                    : Default(/usr/bin/cmake)
 
-   O = --do-test-setup-every-test
-   P = taf.do_test_setup_every_test={false/true}
-                   : Call TestSetup for every test.
-                   : Default(false)
+   O = --database-iteration-mode={preserve|restart|reset|restore}
+   P = taf.database_iteration_mode={preserve|restart|reset|restore}
+                   : Controls what happens to the database between iterations.
+                   :
+                   : preserve
+                   :     Do not modify the database contents between iterations.
+                   :     The backend server is left running unless test_setup_mode
+                   :     requires a drop/load. MainTestSetup runs only when
+                   :     dictated by test_setup_mode.
+                   :
+                   : restart
+                   :     Restart the backend server before each iteration. This
+                   :     resets engine state (buffer pool, caches, background
+                   :     threads) but preserves the database contents. After
+                   :     restart, MainTestSetup runs only if required by
+                   :     test_setup_mode.
+                   :
+                   : reset
+                   :     Fully recreate the database before each iteration. This
+                   :     performs a backend stop, DbInit(), and backend start,
+                   :     producing a cold backend state *and* fresh database
+                   :     contents. MainTestSetup is always invoked after reset,
+                   :     regardless of test_setup_mode.
+                   :
+                   : restore
+                   :     Use a saved database snapshot to restore the datadir
+                   :     before each iteration. On the first iteration, a full
+                   :     MainTestSetup is performed. After setup completes, the
+                   :     framework creates a restore image (tar.gz) in the
+                   :     directory specified by database_restore_image_dir.
+                   :     On subsequent iterations, the backend is stopped,
+                   :     the datadir is replaced with the restore image, and
+                   :     the backend is started cold. MainTestSetup is skipped
+                   :     after the first iteration. Warmup is always required.
+                   :
+                   : Note:  reset and restore override test_setup_mode and will
+                   :        perform test setup on the first iteration.
+                   : Default(preserve)
+
+   O = --database-restore-image-dir=DIR
+   P = taf.database_restore_image_dir=DIR
+                   : Directory where the restore image (restore_image.tar.gz)
+                   : will be created and stored when using
+                   : database_iteration_mode=restore.
+                   : TAF will create DIR if it does not exist and will
+                   : remove all contents of DIR before writing the image.
+                   : Default(db_image)
 
    O = --environment-variables=env;value,env;value,...
    P = taf.environment_variables=env;value,env;value,...
@@ -105,6 +148,11 @@ Note: setup-client
    O = --exit-if-test-lock-exists
    P = taf.exit_if_test_lock_exists={true/false}
                    : Exit if TEST.LOCK exists.
+                   : Default(false)
+
+   O = --include-warmup-iteration
+   P = taf.include_warmup_iteration={false/true}
+                   : Enable warmup iterations before each test case first run.
                    : Default(false)
 
    O = --ignore-running-db-process
@@ -150,6 +198,16 @@ Note: setup-client
                    : Directory where reports are written.
                    : Default(null)
 
+   O = --restore-image-format=FMT
+   P = taf.restore_image_format=FMT
+                   : Format used when creating and restoring database
+                   : restore images. Supported values:
+                   :     copy    - directory copy (fastest)
+                   :     tar     - uncompressed tar archive
+                   :     tar.gz  - gzip-compressed tar archive
+                   : Default(copy)
+
+
    O = --results-root-dir=<path>
    P = taf.results_root_dir=<path>
                    : Root directory for results.
@@ -185,11 +243,6 @@ Note: setup-client
                    : Skip TestPost.
                    : Default(false)
 
-   O = --skip-test-setup
-   P = taf.skip_test_setup={true/false}
-                   : Skip TestSetup.
-                   : Default(false)
-
    O = --skip-test-suite-cleanup
    P = taf.skip_test_suite_cleanup={true/false}
                    : Skip TestSuiteCleanup.
@@ -218,7 +271,35 @@ Note: setup-client
    O = --warmup-duration=<seconds>
    P = taf.warmup_duration=<seconds>
                    : Warmup duration.
-                   : Default(null)
+                   : Default(100)
+
+{TEST SETUP MODES}
+----------------
+
+   O = --test-setup-mode=<mode>
+   P = taf.test_setup_mode=<mode>
+                   : Default(once)
+
+   The framework supports four mutually exclusive modes for running MainTestSetup. 
+   
+   These are controlled by the option:
+
+    test_setup_mode = skip | once | per_test | per_iter
+
+    Meaning:
+
+      skip      : Never run MainTestSetup.
+      once      : Run MainTestSetup once for the entire run.
+      per_test  : Run MainTestSetup once for each test case name.
+      per_iter  : Run MainTestSetup on every iteration.
+
+      Examples:
+
+        test_setup_mode = skip
+        test_setup_mode = once
+        test_setup_mode = per_test
+        test_setup_mode = per_iter
+
 
 {Test Specific Args}
 
@@ -255,6 +336,30 @@ Note: setup-client
    P = taf.use_request_based={true/false}
                    : Convert duration into request count.
                    : Default(false)
+   O = --exec-script-file-before-db-start=<path/to/script/file>
+   P = taf.exec_script_file_before_db_start=<path/to/script/file>
+                   : Execute standalone script before the database is started.
+                   : Output is written to the main results directory.
+                   : Default(null)
+
+   O = --exec-script-file-after-db-start=<path/to/script/file>
+   P = taf.exec_script_file_after_db_start=<path/to/script/file>
+                   : Execute standalone script after the database is started,
+                   : before any TestSetup logic is invoked.
+                   : Output is written to the main results directory.
+                   : Default(null)
+
+   O = --exec-script-file-before-run-iter=<path/to/script/file>
+   P = taf.exec_script_file_before_run_iter=<path/to/script/file>
+                   : Execute standalone script before each test iteration begins.
+                   : Output is written to the current iteration's sub-results directory.
+                   : Default(null)
+
+   O = --exec-script-file-after-run-iter=<path/to/script/file>
+   P = taf.exec_script_file_after_run_iter=<path/to/script/file>
+                   : Execute standalone script after each test iteration completes.
+                   : Output is written to the current iteration's sub-results directory.
+                   : Default(null)
 
     O = --exec-sql-file-before-test-setup=<path/to/sql/file>
     P = taf.exec_sql_file_before_test_setup=<path/to/sql/file>
@@ -336,6 +441,16 @@ Note: setup-client
    O = --db-socket=<path>
    P = taf.db_socket=<path>
                    : Unix socket file for database connections.
+
+   O = --db-start-wait=<sec>
+   P = taf.db_start_wait=<sec>
+                   : Seconds to wait after issuing database start.
+                   : Default(90 Seconds)
+    
+   O = --db-stop-wait=<sec>
+   P = taf.db_stop_wait=<sec>
+                   : Seconds to wait after issuing database stop.
+                   : Default(120 Seconds)
 
    O = --db-clients-use-unix-socket
    P = taf.db_clients_use_unix_socket=<true|false>
@@ -571,6 +686,71 @@ Note: Active Install Marker
    P = taf.db_process_rest_verbose=<bool>
                    : Enable verbose diagnostic snapshots during rest
                    : detection. Intended for troubleshooting only.
+                   : Default(false)
+
+   {Profiling}
+
+   O = --profiler-enabled
+   P = taf.profiler_enabled=<bool>
+                   : Enable or disable profiling for this run.
+                   : When false, no profiler module is loaded and no
+                   : profiling activity occurs.
+                   : Default(false)
+
+   O = --profiler-lib=<name>
+   P = taf.profiler_lib=<name>
+                   : Select the profiler implementation to load.
+                   : Example: taf-perf
+                   : Must match a known profiler module.
+                   : Default(taf-perf)
+
+   O = --profiler-duration=<seconds>
+   P = taf.profiler_duration=<seconds>  
+                   : Duration of profiling when running in duration mode.
+                   : Must fit within the iteration duration when combined
+                   : with profiler-start-delay.
+                   : Default(0)
+
+   O = --profiler-start-delay=<seconds>
+   P = taf.profiler_start_delay=<seconds>
+                   : Delay before profiling begins. Used to avoid
+                   : capturing startup noise or warmup effects.
+                   : Default(0)
+
+   O = --profiler-ts-duration-unit=<sec|min>
+   P = taf.profiler_ts_duration_unit=<sec|min>
+                   : The unit the test suite uses for duration values.
+                   : Controls how 'duration' and 'warmup_duration'
+                   : are interpreted. Values:
+                   :   sec = interpret values as seconds (default)
+                   :   min = interpret values as minutes (converted to sec)
+                   : Default(sec)
+
+   O = --profiler-continuous
+   P = taf.profiler_continuous=<bool>
+                   : Enable continuous profiling mode. When true, the
+                   : profiler runs until explicitly stopped by the
+                   : profiler module. When false, duration mode is used.
+                   : Default(false)
+
+   O = --profiler-opts="<string>"
+   P = taf.profiler_opts="<string>"
+                   : Profiler-specific option string interpreted by the
+                   : selected profiler module. For taf-perf, this is
+                   : passed directly to perf as event options.
+                   : Default(-e cpu-clock:pp)
+
+   O = --profiler-generate-report
+   P = taf.profiler_generate_report=<bool>
+                   : Generate a human-readable report after profiling.
+                   : Interpretation depends on the profiler module.
+                   : Default(false)
+
+   O = --profiler-generate-flamegraph
+   P = taf.profiler_generate_flamegraph=<bool>
+                   : Generate raw stack-trace data suitable for external
+                   : flamegraph tools. Interpretation depends on the
+                   : profiler module.
                    : Default(false)
 
 {Directory Maintenance}

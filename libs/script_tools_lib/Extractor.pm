@@ -6,7 +6,20 @@ package Extractor;
 # Last Modified: January 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -350,7 +363,42 @@ sub _extract_by_type {
     } elsif ($ext eq '.tar.gz' || $ext eq '.tgz') {
         $rc = $self->_run_cmd("tar -xzvf", $archive_file);
     } elsif ($ext eq '.tar.xz') {
-        $rc = $self->_run_cmd("tar -xJvf", $archive_file);
+        # Capability detection for .tar.xz
+        # 1. Try tar -xJf (native xz support)
+        # 2. If tar lacks -J, fall back to: xz -d file.tar.xz && tar -xf file.tar
+        # 3. Fail explicitly if neither tar nor xz can extract the archive
+
+        # Try native tar -J support
+        my $test = system("tar --help 2>/dev/null | grep -q '\\-J'");
+        if ($test == 0) {
+            # tar supports -J
+            $rc = $self->_run_cmd("tar -xJvf", $archive_file);
+            return $rc == OK ? OK : ERROR;
+        }
+        # tar does NOT support -J; check for xz binary
+        my $xz_ok = system("which xz >/dev/null 2>&1");
+        if ($xz_ok == 0) {
+    
+            # Decompress manually: file.tar.xz -> file.tar
+            my $tarfile = $archive_file;
+            $tarfile =~ s/\.xz$//;   # strip .xz
+    
+            my $cmd1 = "xz -d '$archive_file'";
+            print "Running: $cmd1\n" if $self->{debug};
+            my $rc1 = system($cmd1);
+            if ($rc1 != OK) {
+                print STDERR "ERROR: Failed to decompress $archive_file using xz\n";
+                return ERROR;
+            }
+    
+            # Extract the resulting .tar
+            my $rc2 = $self->_run_cmd("tar -xvf", $tarfile);
+            return $rc2 == OK ? OK : ERROR;
+        }
+    
+        # Neither tar -J nor xz is available
+        print STDERR "ERROR: Host cannot extract .tar.xz archives (no tar -J, no xz)\n";
+        return ERROR;
     } elsif ($ext eq '.tar.bz2') {
         $rc = $self->_run_cmd("tar -xjvf", $archive_file);
     } else {

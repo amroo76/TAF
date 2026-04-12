@@ -3,10 +3,23 @@ package TAF::Database;
 # TAF::Database
 #
 # Created: December 2025
-# Last Modified: January 2026
+# Last Modified: March 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -95,6 +108,7 @@ use TAF::Logging qw(
     TAFMsg
 );
 use TAF::Utilities qw(
+    ExecuteOsScript
     NormalizeDBExecutable
     NormalizePluginName
     GetInstallActions
@@ -102,7 +116,7 @@ use TAF::Utilities qw(
 );
 
 use constant TAF_DATABASE => 'TAF::Database-> ';
-our $VERSION = '2.0';
+our $VERSION = '2.5';
 
 #===============================================================================
 #                              Exports
@@ -113,6 +127,8 @@ our @EXPORT = qw(
     CheckSslFiles
     ConfigContainsSSL
     DbInit
+    DbReset
+    DbRestart
     DbStart
     DbStats
     DbStop
@@ -294,6 +310,7 @@ sub ConfigContainsSSL {
 #===============================================================================
 sub DbInit {
     my ($ctx) = @_;
+    my $taf_opt_ref = $ctx->{options};
 
     my $obj_ref = $ctx->{obj};
     my $taf_var_ref = $ctx->{taf_var};
@@ -324,7 +341,8 @@ sub DbInit {
 #
 # PURPOSE:
 #     Bring the backend database online by invoking the loaded database
-#     plugin's db_start() routine and updating lifecycle state accordingly.
+#     plugin's db_start() routine with the configured start-wait time and
+#     updating lifecycle state accordingly.
 #
 # PARAMETERS:
 #     $ctx  - Full TAF context hashref containing:
@@ -333,12 +351,14 @@ sub DbInit {
 # BEHAVIOR:
 #     - Print the backend start stage header.
 #     - Ensure that a valid database plugin object is loaded.
-#     - Invoke the plugin's db_start() method to start the database server.
+#     - Retrieve the start-wait time from options (taf.db_start_wait).
+#     - Invoke the plugin's db_start(<wait-seconds>) method.
 #     - On failure:
 #           * Set taf_var->{db_started} to FALSE.
 #           * Log an error and return ERROR.
 #     - On success:
 #           * Set taf_var->{db_started} to TRUE.
+#           * Capture the database PID via db_pid().
 #           * Log successful startup.
 #
 # RETURNS:
@@ -347,7 +367,7 @@ sub DbInit {
 #
 # SIDE EFFECTS:
 #     - Emits stage headers and verbose lifecycle logs.
-#     - Updates $ctx->{taf_var}{db_started}.
+#     - Updates $ctx->{taf_var}{db_started} and $ctx->{taf_var}{db_pid}.
 #
 # NOTES:
 #     - Caller must pass the full context; lifecycle helpers extract what they
@@ -358,26 +378,59 @@ sub DbStart {
 
     my $obj_ref     = $ctx->{obj};
     my $taf_var_ref = $ctx->{taf_var};
-
+    my $options_ref = $ctx->{options};
+    
     PrintHeader("== STAGE: BACKEND START ============================", "=", 71);
     my $dbs = StageStart(TAF_DATABASE . "DbStart ->");
-
+    
+    # Execute script before DB start (if configured)
+    if (defined $options_ref->{exec_script_file_before_db_start}
+        && $options_ref->{exec_script_file_before_db_start} ne "") {
+    
+        my $script = $options_ref->{exec_script_file_before_db_start};
+        my $logDir = $options_ref->{logs_dir};
+    
+        if (TAF::Utilities::ExecuteOsScript($ctx,
+                                            "before_db_start",
+                                            $script, 
+                                            $logDir) != OK) {
+            PrintError($dbs."Pre-DB-start script failed.");
+            return ERROR;
+        }
+    }
+    
     # Ensure plugin object is loaded
     return ERROR unless _EnsurePluginLoaded($ctx);
-
+    
     PrintVerbose($dbs . "Starting database...");
-
+    
     # Attempt to start the database
-    if ($obj_ref->{db_plugin}->db_start() != OK) {
+    if ($obj_ref->{db_plugin}->db_start($options_ref->{db_start_wait}) != OK) {
         $taf_var_ref->{db_started} = FALSE;
         PrintError($dbs . "Database failed to start.");
         return ERROR;
     }
-
+    
     $taf_var_ref->{db_started} = TRUE;
     $taf_var_ref->{db_pid} = $obj_ref->{db_plugin}->db_pid();
     PrintVerbose($dbs . "Database started successfully.");
-
+    
+    # Execute script after DB start (if configured)
+    if (defined $options_ref->{exec_script_file_after_db_start}
+        && $options_ref->{exec_script_file_after_db_start} ne "") {
+    
+        my $script = $options_ref->{exec_script_file_after_db_start};
+        my $logDir = $options_ref->{logs_dir};
+    
+        if (TAF::Utilities::ExecuteOsScript($ctx,
+                                            "after_db_start",
+                                            $script,
+                                            $logDir) != OK) {
+            PrintError($dbs."Post-DB-start script failed.");
+            return ERROR;
+        }
+    }
+    
     StageEnd($dbs);
     return OK;
 }
@@ -386,10 +439,10 @@ sub DbStart {
 # DbStop
 #
 # PURPOSE:
-#     Attempt a graceful shutdown of the database using the best information
-#     TAF has about the active instance. If the framework believes the database
-#     was started (db_started == TRUE), a managed-state shutdown is attempted.
-#     Otherwise, reachability-based shutdown is attempted using db_ping().
+#     Attempt a graceful shutdown of the backend database by invoking the
+#     loaded database plugin's db_stop() routine with the configured stop-wait
+#     time, using managed state when available and falling back to reachability
+#     discovery when necessary.
 #
 # PARAMETERS:
 #     $ctx  - Full TAF context hashref containing:
@@ -399,21 +452,26 @@ sub DbStart {
 #     - Print the backend shutdown stage header.
 #     - Ensure that a valid database plugin object is loaded.
 #     - If taf_var->{db_started} is TRUE:
-#           * Invoke plugin->db_stop().
-#           * On success, set db_started to FALSE and return OK.
-#           * On failure, log an error and return ERROR.
-#     - If db_started is not TRUE:
-#           * Attempt reachability discovery via _DiscoverDbReachability().
-#           * If reachable, invoke plugin->db_stop() and return OK on success.
-#           * If unreachable, log an error and return ERROR.
+#           * Invoke db_stop(<wait-seconds>) using managed state.
+#           * On success: set db_started to FALSE and return OK.
+#           * On failure: log error and return ERROR.
+#     - If taf_var->{db_started} is not TRUE:
+#           * Perform reachability discovery via _DiscoverDbReachability().
+#           * If reachable:
+#                 - Invoke db_stop(<wait-seconds>) using discovered reachability.
+#                 - On success: return OK.
+#                 - On failure: log error and return ERROR.
+#           * If not reachable:
+#                 - Log that no shutdown is possible and suggest shutdown-hard.
+#                 - Return ERROR.
 #
 # RETURNS:
-#     OK    - Database stopped successfully or nothing to shut down.
-#     ERROR - Plugin missing, shutdown failed, or database not reachable.
+#     OK    - Database stopped successfully.
+#     ERROR - Plugin missing, shutdown failed, or database unreachable.
 #
 # SIDE EFFECTS:
 #     - Emits stage headers and verbose lifecycle logs.
-#     - May update taf_var->{db_started}.
+#     - Updates $ctx->{taf_var}{db_started}.
 #
 # NOTES:
 #     - Caller must pass the full context; lifecycle helpers extract what they
@@ -471,6 +529,113 @@ sub DbStop {
     PrintError($dbs . "Database not reachable; nothing further to do.");
     PrintVerbose($dbs . "Maybe use action shutdown-hard.");
     return ERROR;
+}
+
+#===============================================================================
+# DbReset
+#
+# PURPOSE:
+#     Perform a full database reset by stopping the server, reinitializing the
+#     database files via DbInit(), and starting the server again. This produces
+#     a cold backend state *and* a fresh database contents state.
+#
+# BEHAVIOR:
+#     - Print reset stage header.
+#     - Ensure plugin is loaded.
+#     - Attempt DbStop():
+#           * If DbStop() returns OK, proceed.
+#           * If DbStop() returns ERROR due to "not running", continue.
+#           * Otherwise, abort.
+#     - Invoke DbInit() to recreate the database files.
+#     - Invoke DbStart() to bring the server online.
+#
+# RETURNS:
+#     OK    - Reset succeeded.
+#     ERROR - Reset failed.
+#===============================================================================
+sub DbReset {
+    my ($ctx) = @_;
+
+    PrintHeader("== STAGE: BACKEND RESET =============================", "=", 71);
+    my $dbr = StageStart(TAF_DATABASE . "DbReset ->");
+
+    # Ensure plugin object is loaded
+    return ERROR unless _EnsurePluginLoaded($ctx);
+
+    PrintVerbose($dbr . "Resetting database (stop -> init -> start)...");
+
+    # Attempt to stop database
+    my $stop_rc = DbStop($ctx);
+    if ($stop_rc != OK) {
+        PrintVerbose($dbr . "DbStop() returned ERROR; assuming database was not running.");
+    }
+
+    # Reinitialize database files
+    if (DbInit($ctx) != OK) {
+        PrintError($dbr . "DbInit() failed during reset.");
+        return ERROR;
+    }
+
+    # Start database
+    if (DbStart($ctx) != OK) {
+        PrintError($dbr . "DbStart() failed during reset.");
+        return ERROR;
+    }
+
+    PrintVerbose($dbr . "Database reset successfully.");
+
+    StageEnd($dbr);
+    return OK;
+}
+
+#===============================================================================
+# DbRestart
+#
+# PURPOSE:
+#     Perform a full database restart by invoking DbStop() followed by DbStart().
+#     This ensures a clean backend state between iterations or actions.
+#
+# BEHAVIOR:
+#     - Print restart stage header.
+#     - Ensure plugin is loaded.
+#     - Attempt DbStop():
+#           * If DbStop() returns OK, proceed.
+#           * If DbStop() returns ERROR due to "not running", continue.
+#           * Otherwise, abort.
+#     - Invoke DbStart() and return its result.
+#
+# RETURNS:
+#     OK    - Restart succeeded.
+#     ERROR - Restart failed.
+#===============================================================================
+sub DbRestart {
+    my ($ctx) = @_;
+
+    PrintHeader("== STAGE: BACKEND RESTART ============================", "=", 71);
+    my $dbr = StageStart(TAF_DATABASE . "DbRestart ->");
+
+    # Ensure plugin object is loaded
+    return ERROR unless _EnsurePluginLoaded($ctx);
+
+    PrintVerbose($dbr . "Restarting database...");
+
+    # Attempt to stop database
+    # DbStop() may fail if DB was not running; tolerate that case
+    my $stop_rc = DbStop($ctx);
+    if ($stop_rc != OK) {
+        PrintVerbose($dbr . "DbStop() returned ERROR; assuming database was not running.");
+    }
+
+    # Attempt to start database
+    if (DbStart($ctx) != OK) {
+        PrintError($dbr . "DbStart() failed during restart.");
+        return ERROR;
+    }
+
+    PrintVerbose($dbr . "Database restarted successfully.");
+
+    StageEnd($dbr);
+    return OK;
 }
 
 #===============================================================================
@@ -1159,6 +1324,8 @@ sub _LoadDbPlugin {
         # Misc
         tmp_dir                 => $options_ref->{tmp_dir},
         db_extra_args           => $options_ref->{db_extra_args},
+        db_start_wait           => $options_ref->{db_start_wait},
+        db_stop_wait            => $options_ref->{db_stop_wait},
     );
 
     PrintVerbose($ldb . "Instantiating plugin '$plugin_name' with arguments:");

@@ -3,10 +3,23 @@ package TAF::Run;
 # TAF::Run
 #
 # Created: December 2025
-# Last Modified: January 2026
+# Last Modified: March 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -120,28 +133,10 @@ use File::Basename;
 use strict;
 use warnings;
 use List::Util qw(max all);
-
-BEGIN {
-    require File::Basename;
-    require File::Spec;
-
-    my $here      = File::Spec->rel2abs(__FILE__);
-    my $taf_libs  = File::Spec->catdir(File::Basename::dirname($here), File::Spec->updir);
-    my $libs_root = File::Spec->catdir($taf_libs, File::Spec->updir);
-    unshift @INC, $libs_root;
-    
-
-    my $sql_libs   = File::Spec->catdir($libs_root, "sql_libs");
-    my $tools_dir  = File::Spec->catdir($libs_root, "script_tools_lib");
-
-    unshift @INC, $taf_libs  unless grep { $_ eq $taf_libs } @INC;
-    unshift @INC, $sql_libs  unless grep { $_ eq $sql_libs } @INC;
-    unshift @INC, $tools_dir unless grep { $_ eq $tools_dir } @INC;
-
-}
-
 use sql_libs::Executor;
 Executor->import(':all');
+
+use profile_libs::Runner;
 
 use TAF::Logging qw(PrintError
                     PrintHeader
@@ -154,9 +149,12 @@ use TAF::Logging qw(PrintError
 
 require toolsLib;
 use TAF::Archive;
-
+use TAF::Database;
+use TAF::Utilities qw(
+    ExecuteOsScript
+);
 use constant TAF_RUN => 'TAF::Run::';
-our $VERSION = '2.0';
+our $VERSION = '2.5';
 
 #===============================================================================
 #                            Exports
@@ -203,13 +201,13 @@ use constant {
 #   $ctx : Framework context object.
 #
 # Behavior:
-#   - Initializes state flags.
+#   - Initializes state flags for the test suite run.
 #   - Loads tests and thread counts (user-specified or suite defaults).
 #   - Calls suite PreTestSetup() once before all tests.
 #   - For each test:
-#       * Resets per-test flags.
-#       * Delegates to RunThreads() for thread/iteration execution.
-#       * Runs cleanup, reporting, and archiving.
+#       * Resets per-test state flags.
+#       * Delegates to RunThreads() for thread and iteration execution.
+#       * Runs cleanup, reporting, and archiving for the test.
 #   - Calls suite-level cleanup after all tests complete.
 #
 # Returns:
@@ -227,7 +225,6 @@ sub RunTests {
     PrintHeader("== STAGE: RUN TESTS ============================","=",71);
 
     my $rth = StageStart(TAF_RUN."RunTests");
-    $ctx->{state}{first_time_in_tests_loop} = TRUE;
 
     PrintVerbose($rth."TestSuite = ".$options->{test_suite});
 
@@ -247,6 +244,7 @@ sub RunTests {
 
         $flags->{archive_completed}     = FALSE;
         $ctx->{state}{warmup_run_done}  = FALSE;
+        $ctx->{state}{first_time_in_tests_loop} = TRUE;
 
         my $testTime = $obj->{date}->GetStartTime();
 
@@ -342,7 +340,7 @@ sub RunThreads {
 #
 # PURPOSE:
 #     Execute all iterations for a given test/thread combination. Coordinates
-#     setup, optional warmup, main run, and post‑processing for each iteration,
+#     setup, optional warmup, main run, and post processing for each iteration,
 #     producing a deterministic and contributor‑proof iteration lifecycle.
 #
 # PARAMETERS:
@@ -362,12 +360,13 @@ sub RunThreads {
 #           * Emit iteration header and verbose logging.
 #           * Create the iteration results directory via MakeResultsSubDir().
 #           * Validate that the directory exists.
-#           * Invoke CheckTestSetup() to run or skip setup.
-#           * If warmup has not yet been performed and warmup_duration is set,
-#             execute RunWarmupIteration().
-#           * Execute the main iteration via MainTestRun().
-#           * Execute post‑processing via MainTestPost().
-#           * Emit an iteration‑complete header.
+#           * Invoke CheckTestSetup() to perform any required database setup,
+#             including restart/reset behavior based on database_iteration_mode.
+#           * If warmup has not yet been performed and include_warmup_iteration
+#             is enabled, execute RunWarmupIteration().
+#           * Execute the main iteration via MainTestRun(..., "RUN").
+#           * Execute post processing via MainTestPost().
+#           * Emit an iteration complete header.
 #     - End the lifecycle stage and return OK.
 #
 # RETURNS:
@@ -378,7 +377,8 @@ sub RunThreads {
 #         Any iteration failed (setup, warmup, run, or post‑processing).
 #
 # NOTES:
-#     - Warmup is executed only once per test/thread combination.
+#     - Warmup is executed only once per test/thread combination unless reset or
+#       restart forces warmup_run_done to be cleared.
 #     - Results directory for each iteration is stored in $ctx->{dirs}{results}.
 #     - All subordinate routines must follow OK/ERROR contracts.
 #===============================================================================
@@ -412,9 +412,7 @@ sub RunIterations {
         return ERROR if CheckTestSetup($ctx, $test, $thread, $iter) != OK;
 
         # Optional warmup
-        if (!$ctx->{state}{warmup_run_done}
-            && defined $options->{warmup_duration}) {
-
+        if (!$ctx->{state}{warmup_run_done} && $options->{include_warmup_iteration}) {
             return ERROR if RunWarmupIteration($ctx, $test, $thread, $iter) != OK;
         }
 
@@ -456,7 +454,7 @@ sub RunIterations {
 #     - Start a lifecycle stage for traceability.
 #     - Invoke MainTestRun() with runType "WARMUP".
 #     - On success, mark warmup as completed in $ctx->{state}{warmup_run_done}.
-#     - Emit contributor‑proof logging for visibility.
+#     - Emit contributor proof logging for visibility.
 #     - End the lifecycle stage and return OK.
 #
 # RETURNS:
@@ -499,85 +497,178 @@ sub RunWarmupIteration {
 # CheckTestSetup
 #
 # PURPOSE:
-#     Determine whether test setup should run for the current iteration. Ensures
-#     setup is executed once per test loop unless explicitly overridden by
-#     framework options.
+#     Determine whether MainTestSetup should run for the current iteration.
+#     Behavior is controlled by two orthogonal lifecycle options:
+#
+#         test_setup_mode:
+#             skip      - Never run setup for any test or iteration.
+#             once      - Run setup once for the entire test suite run.
+#             per_test  - Run setup once when entering the test loop for a test.
+#             per_iter  - Run setup on every iteration.
+#
+#         database_iteration_mode:
+#             preserve  - Do not restart or recreate the database between
+#                         iterations. Backend state and data are preserved.
+#
+#             restart   - Restart the backend server before each iteration.
+#                         Engine state (buffer pool, caches, background threads)
+#                         is reset, but database contents are preserved.
+#
+#             reset     - Fully recreate the database before each iteration.
+#                         Performs backend stop, DbInit(), and backend start.
+#                         Produces a cold backend state *and* fresh data.
+#                         Always forces MainTestSetup to run, regardless of
+#                         test_setup_mode.
 #
 # PARAMETERS:
-#     $ctx
-#         Framework context object.
-#
-#     $test
-#         Test name.
-#
-#     $thread
-#         Thread count for the current run.
-#
-#     $iter
-#         Iteration number.
+#     $ctx     Framework context object.
+#     $test    Test case descriptor.
+#     $thread  Thread count for the current run.
+#     $iter    Iteration number.
 #
 # BEHAVIOR:
 #     - Start a lifecycle stage for traceability.
-#     - Read skip_test_setup and do_test_setup_every_test options.
-#     - When setup is not skipped:
-#           * Run MainTestSetup() if:
-#                 - This is the first time in the test loop AND setup has not
-#                   yet been performed, OR
-#                 - The user forces setup every iteration.
-#           * Update state flags:
-#                 first_time_in_tests_loop
-#                 initial_test_setup_done
-#     - When setup is skipped:
-#           * Emit a warning only once per test loop.
-#     - End the lifecycle stage and return OK.
+#
+#     - If database_iteration_mode is "restart":
+#           * Restart backend via DbRestart().
+#           * Reset warmup_run_done to ensure warmup runs on the cold backend.
+#
+#     - If database_iteration_mode is "reset":
+#           * Fully recreate database via DbReset().
+#           * Force MainTestSetup to run this iteration.
+#
+#     - Evaluate test_setup_mode:
+#           skip:
+#               Emit a warning once and never run setup.
+#
+#           once:
+#               Run setup only if it has not yet been performed for this run.
+#
+#           per_test:
+#               Run setup the first time the test loop is entered for this test.
+#
+#           per_iter:
+#               Run setup on every iteration.
+#
+#     - When setup runs:
+#           * Invoke MainTestSetup().
+#           * Mark initial_test_setup_done = TRUE.
+#           * Reset warmup_run_done because DB drop/load produces a cold state.
+#
+#     - Mark that the test loop has been entered at least once.
 #
 # RETURNS:
-#     OK
-#         Setup executed or skipped successfully.
-#
-#     ERROR
-#         MainTestSetup() failed.
+#     OK     Setup executed or skipped successfully.
+#     ERROR  DbRestart(), DbReset(), or MainTestSetup() failed.
 #
 # NOTES:
-#     - Ensures contributor-proof, deterministic setup behavior.
-#     - Caller is responsible for invoking this once per iteration.
+#     - Ensures deterministic, contributor-proof setup and warmup behavior.
+#     - Caller must invoke this once per iteration.
 #===============================================================================
 sub CheckTestSetup {
     my ($ctx, $test, $thread, $iter) = @_;
 
-    PrintHeader("== STAGE: CHECK TEST SETUP =======================", "=", 71);
     my $ct = StageStart(TAF_RUN."CheckTestSetup");
+    my $should_run = FALSE;
 
-    # Break out ctx
     my $state   = $ctx->{state};
     my $options = $ctx->{options};
 
-    my $skip        = $options->{skip_test_setup};
-    my $setup_every = $options->{do_test_setup_every_test};
+    # States
+    my $firstLoop      = $state->{first_time_in_tests_loop};
+    my $initialTsDone  = $state->{initial_test_setup_done};
+    my $restoreCreated = $state->{restore_created};
 
-    if (!$skip) {
+    # Options
+    my $tsMode = lc($options->{test_setup_mode}); # skip|once|per_test|per_iter
+    my $dbMode = lc($options->{database_iteration_mode}); # preserve|restart|reset|restore
 
-        # Run setup if:
-        #   - first time in test loop AND setup not yet done
-        #   - OR user forces setup every iteration
-        if (($state->{first_time_in_tests_loop} && !$state->{initial_test_setup_done})
-            || $setup_every) {
+    PrintHeader("== STAGE: CHECK TEST SETUP =======================", "=", 71);
 
-            $state->{first_time_in_tests_loop} = FALSE;
+    PrintVerbose($ct."Opt:   test_setup_mode          = ".$tsMode);
+    PrintVerbose($ct."Opt:   database_iteration_mode  = ".$dbMode);
+    PrintVerbose($ct."State: first_time_in_tests_loop = ".$firstLoop);
+    PrintVerbose($ct."State: initial_test_setup_done  = ".$initialTsDone);
+    PrintVerbose($ct."State: restore_created          = ".$restoreCreated);
 
-            PrintVerbose($ct."Calling MainTestSetup");
-            return ERROR if MainTestSetup($ctx, $test, $thread, $iter) != OK;
-
-            $state->{initial_test_setup_done} = TRUE;
+    # Optional: restart or reset database each iteration
+    if ($firstLoop != TRUE) {
+        if($dbMode ne "preserve"){
+            if($dbMode eq "restore" && $restoreCreated){
+                PrintVerbose("Database restore requested, restoring database for initial setup.");
+                return _RestoreImage($ctx);
+            }
+            elsif($dbMode eq "restart"){
+                PrintVerbose("Database restart requested before iteration $iter; invoking TAF::Database::DbRestart().");
+                if (TAF::Database::DbRestart($ctx) != OK) {
+                    PrintError("TAF::Database::DbRestart() failed before iteration $iter.");
+                    return ERROR;
+                }
+                $state->{warmup_run_done}=FALSE;
+            } elsif($dbMode eq "reset"){
+                PrintVerbose("Database reset requested before iteration $iter; invoking TAF::Database::DbReset().");
+                if (TAF::Database::DbReset($ctx) != OK) {
+                    PrintError("TAF::Database::DbReset() failed before iteration $iter.");
+                    return ERROR;
+                }
+                $should_run = TRUE;
+            } else {
+                PrintError("Invalid database_iteration_mode '$dbMode'. Must be one of: preserve, restart, restore, reset");
+                return ERROR;
+            }
         }
     }
-    else {
-        # Only warn once per test loop
-        unless ($state->{skip_test_setup_warned}) {
-            PrintWarning($ct."Skip TestSetup detected. TestSetup will be skipped.");
-            $state->{skip_test_setup_warned} = TRUE;
+
+    # if not using database restore, check the test setup mode
+    if($dbMode ne "restore"){
+        # Mode: skip
+        if ($tsMode ne "skip") {
+            # Mode: once for entire run
+            if ($tsMode eq "once") {
+                if ($initialTsDone != TRUE) {
+                    $should_run = TRUE;
+                }
+            }
+            # Mode: once per test loop entry
+            elsif ($tsMode eq "per_test") {
+                if ($firstLoop != FALSE) {
+                    $should_run = TRUE;
+                }
+            }
+            # Mode: every iteration
+            elsif ($tsMode eq "per_iter") {
+                $should_run = TRUE;
+            } else {
+                PrintError("Invalid test_setup_mode '$tsMode'. Must be one of: skip, once, per_test, per_iter");
+                return ERROR;
+            }
+        } else {
+           # Skipping
+           if ($state->{skip_test_setup_warned} != TRUE) {
+               PrintWarning($ct."TestSetup is disabled (mode=skip).");
+               $state->{skip_test_setup_warned} = TRUE;
+           }
+        }
+    } else{
+        $should_run = TRUE;
+    }
+
+    # Should we run test setup?
+    if ($should_run) {
+        PrintVerbose($ct."Calling MainTestSetup");
+        if (MainTestSetup($ctx, $test, $thread, $iter) != OK) {
+            return ERROR;
+        }
+        $state->{initial_test_setup_done} = TRUE;
+        $state->{warmup_run_done}         = FALSE;
+        if($dbMode eq "restore" && !$restoreCreated){
+           PrintVerbose("Database restore requested, creating restore image...");
+           return ERROR if _CreateRestoreImage($ctx) != OK;
         }
     }
+
+    # We have now been in the test loop at least once
+    $state->{first_time_in_tests_loop} = FALSE;
 
     StageEnd($ct);
     return OK;
@@ -677,8 +768,8 @@ sub MainTestSetup {
 #
 # PURPOSE:
 #     Execute a single test iteration (RUN or WARMUP). Handles readme metadata,
-#     lifecycle logging, timing, pre/post run sleeps, and delegation to the
-#     test suite's TestRun() routine.
+#     lifecycle logging, timing, SQL hooks, optional OS-script hooks, profiling,
+#     pre/post run sleeps, and delegation to the test suite's TestRun() routine.
 #
 # PARAMETERS:
 #     $ctx
@@ -701,12 +792,17 @@ sub MainTestSetup {
 #     - For non-warmup runs:
 #           * Write initial readme metadata via WriteReadmeStart().
 #           * Log run details (host, duration, results directory, timestamp).
-#     - Capture start time for duration measurement.
+#           * Execute SQL hook exec_sql_file_before_run_iter.
+#           * Execute OS-script hook exec_script_file_before_run_iter.
 #     - Emit a RUN stage header.
 #     - Perform optional pre-run sleep (sleep_before_test_run).
+#     - Start profiling if enabled and not a warmup.
 #     - Delegate execution to main::TestRun().
 #     - Compute elapsed run duration.
+#     - Stop profiling if continuous and not a warmup.
 #     - For non-warmup runs:
+#           * Execute OS-script hook exec_script_file_after_run_iter.
+#           * Execute SQL hook exec_sql_file_after_run_iter.
 #           * Finalize readme via WriteReadmeEnd().
 #     - Perform optional post-run sleep (sleep_after_test_run).
 #     - End the lifecycle stage and return OK.
@@ -716,10 +812,11 @@ sub MainTestSetup {
 #         TestRun completed successfully.
 #
 #     ERROR
-#         TestRun returned ERROR.
+#         TestRun returned ERROR or a hook failed.
 #
 # NOTES:
-#     - Warmup runs skip all readme generation.
+#     - Warmup runs skip all readme generation, SQL hooks, OS-script hooks,
+#       and profiling.
 #     - Results directory for the iteration must already be established.
 #     - Duration logging uses the date utility in $ctx->{obj}{date}.
 #===============================================================================
@@ -756,20 +853,78 @@ sub MainTestRun {
                             $dateTime);
 
         # Check to see if SQL File to run
-        return ERROR if MaybeExecuteSqlHook($ctx, "exec_sql_file_before_run_iter", $resultsSubDir) != OK;
+        return ERROR if MaybeExecuteSqlHook($ctx,
+                                            "exec_sql_file_before_run_iter", 
+                                            $resultsSubDir) != OK;
     }
 
     # Run stage
-    my $startTime = $obj->{date}->GetStartTime();
     PrintHeader("== STAGE: RUN ====================================", "=", 71);
 
+    # Sleep before if user wants...
     SleepWithLog($mtr2."sleep_before_test_run", $opts->{sleep_before_test_run});
 
-    PrintVerbose($mtr2."Calling test suite's main::TestRun");
-    my $returnCode = main::TestRun($test, $thread, $iter, $runType, $resultsSubDir);
+    # Execute script before run iteration (if configured)
+    if (uc($runType) ne 'WARMUP') {
+       if (defined $opts->{exec_script_file_before_run_iter}
+          && $opts->{exec_script_file_before_run_iter} ne "") {
+           my $script = $opts->{exec_script_file_before_run_iter};
+           if (TAF::Utilities::ExecuteOsScript($ctx,
+                                               "before_run_iter",
+                                               $script, 
+                                               $resultsSubDir) != OK) {
+               PrintError($mtr2."Pre-run-iteration script failed.");
+               return ERROR;
+           }
+       }
+    }
 
+    # Check on profiling
+    if (uc($runType) ne 'WARMUP' && $opts->{profiler_enabled}) {
+        PrintVerbose($mtr2."Profiling enabled, attempting to start...");
+        if (profile_libs::Runner::start($ctx) != OK) {
+            PrintError("Profiler start failed (see profiler diagnostics above)");
+            return ERROR;
+        }
+    }
+
+    # Run iteration
+    my $startTime = $obj->{date}->GetStartTime();
+    PrintVerbose($mtr2."Calling test suite's main::TestRun");
+    my $returnCode = main::TestRun($test,
+                                   $thread, 
+                                   $iter, 
+                                   $runType, 
+                                   $resultsSubDir);
     my $runDuration = $obj->{date}->FigureElapsedTimeSeconds($startTime);
     PrintVerbose($mtr2."Iteration run time in seconds: ".$runDuration);
+
+    # Stop profiling if continuous.
+    if (uc($runType) ne 'WARMUP' && 
+      $opts->{profiler_enabled} && 
+      $opts->{profiler_continuous}) {
+       PrintVerbose($mtr2."Profiling enabled continuous, attempting to stop...");
+       if (profile_libs::Runner::stop($ctx) != OK) {
+            PrintError("Profiler stop failed (continuous mode shutdown error)");
+            return ERROR;
+        }
+    }
+
+    # Execute script after run iteration (if configured)
+    if (uc($runType) ne 'WARMUP') {
+        if (defined $opts->{exec_script_file_after_run_iter}
+           && $opts->{exec_script_file_after_run_iter} ne "") {
+    
+            my $script = $opts->{exec_script_file_after_run_iter};
+            if (TAF::Utilities::ExecuteOsScript($ctx,
+                                                "after_run_iter", 
+                                                $script, 
+                                                $resultsSubDir) != OK) {
+                PrintError($mtr2."Post-run-iteration script failed.");
+                return ERROR;
+            }
+        }
+    }
 
     # Non-warmup: finalize readme
     if (uc($runType) ne 'WARMUP') {
@@ -778,7 +933,9 @@ sub MainTestRun {
         WriteReadmeEnd($ctx, $runDuration);
 
         # Check to see if SQL File to run
-        return ERROR if MaybeExecuteSqlHook($ctx, "exec_sql_file_after_run_iter", $resultsSubDir) != OK;
+        return ERROR if MaybeExecuteSqlHook($ctx, 
+                                            "exec_sql_file_after_run_iter", 
+                                            $resultsSubDir) != OK;
     }
 
     # Check return
@@ -788,7 +945,9 @@ sub MainTestRun {
     }
 
     # Check for break between
-    CheckDbRestOrSleep($ctx,$mtr2."sleep_after_test_run", $opts->{sleep_after_test_run});
+    CheckDbRestOrSleep($ctx,
+                       $mtr2."sleep_after_test_run", 
+                       $opts->{sleep_after_test_run});
 
     StageEnd($mtr);
     return OK;
@@ -1989,7 +2148,668 @@ sub MaybeExecuteSqlHook {
     return sql_libs::Executor::DbExecuteSqlFile($ctx, $sql_file, $output_file);
 }
 
-#############################################################################
+
+################################################################################
+# _CreateRestoreImage
+#
+# Purpose:
+#   Top-level restore image creation entry point. This routine performs the
+#   lifecycle management required for creating a restore image:
+#       - ensure restore directory exists
+#       - clean its contents
+#       - stop the database backend
+#       - dispatch to the format-specific creation routine
+#       - restart the backend
+#       - update state flags
+#
+# Behavior:
+#   - Extracts all required paths and flags from $ctx->{options}.
+#   - Ensures the restore image root directory exists.
+#   - Removes all contents of the restore directory (keep_root => 1).
+#   - Stops the database backend before snapshot creation.
+#   - Dispatches to one of:
+#         CreateRestoreImage_Copy
+#         CreateRestoreImage_Tar
+#         CreateRestoreImage_TarGz
+#   - Restarts the backend after snapshot creation.
+#   - Marks restore_created = TRUE.
+#
+# Parameters:
+#   $ctx : Full TAF runtime context. All required state is extracted from
+#          $ctx->{options}. No additional arguments are accepted.
+#
+# Returns:
+#   OK    : Restore image successfully created.
+#   ERROR : Any failure in directory prep, backend stop/start, or format routine.
+#
+# Notes:
+#   - This routine performs lifecycle control only. All format-specific work
+#     is delegated to the CreateRestoreImage_* subs.
+#   - Deterministic and contributor-proof. No hidden behavior.
+################################################################################
+sub _CreateRestoreImage {
+    my ($ctx) = @_;
+    my $cri = StageStart(TAF_RUN."_CreateRestoreImage");
+
+    my $state = $ctx->{state};
+    my $ops   = $ctx->{options};
+
+    my $restore_dir = $ops->{database_restore_image_dir};
+    my $fmt         = lc($ops->{restore_image_format});
+
+    # Ensure restore directory exists
+    if (! -d $restore_dir) {
+        if (! mkdir $restore_dir) {
+            PrintError("Failed to create restore dir: $restore_dir");
+            return ERROR;
+        }
+    }
+
+    # Remove all contents of restore directory (keep root)
+    eval {
+        require File::Path;
+        File::Path::remove_tree($restore_dir, { keep_root => 1 });
+    };
+    if ($@) {
+        PrintError("Failed to clean restore dir: $restore_dir");
+        return ERROR;
+    }
+
+    # Stop database before snapshot
+    if (TAF::Database::DbStop($ctx) != OK) {
+        PrintError("DbStop failed during restore image creation");
+        return ERROR;
+    }
+
+    #
+    # Dispatch to format-specific implementation
+    #
+    my $rc;
+
+    if ($fmt eq 'copy') {
+        $rc = CreateRestoreImage_Copy($ctx);
+    }
+    elsif ($fmt eq 'tar') {
+        $rc = CreateRestoreImage_Tar($ctx);
+    }
+    elsif ($fmt eq 'tar.gz') {
+        $rc = CreateRestoreImage_TarGz($ctx);
+    }
+    else {
+        PrintError("Unknown restore_image_format: $fmt");
+        return ERROR;
+    }
+
+    if ($rc != OK) {
+        PrintError("Restore image creation failed for format: $fmt");
+        return ERROR;
+    }
+
+    # Start database back up
+    if (TAF::Database::DbStart($ctx) != OK) {
+        PrintError("DbStart failed after restore image creation");
+        return ERROR;
+    }
+
+    # Mark restore image created
+    $state->{restore_created} = TRUE;
+
+    StageEnd($cri);
+    return OK;
+}
+
+################################################################################
+# CreateRestoreImage_Copy
+#
+# Purpose:
+#   Create a restore image using the "copy" format. This method performs a
+#   metadata-preserving directory copy of the database data directory and,
+#   if defined, the transaction logs directory into the restore image root.
+#
+# Behavior:
+#   - Extracts all required paths and flags from $ctx->{options}.
+#   - Assumes the restore image root directory already exists and has been
+#     cleaned by the caller (keep_root => 1).
+#   - Creates subdirectories:
+#         <restore_dir>/data
+#         <restore_dir>/trans_logs   (only if db_trans_logs_dir is defined)
+#   - Uses toolsLib::CopyRecursive to copy directory contents with correct
+#     metadata preservation (via FileOps::CopyR).
+#   - Returns OK on success, ERROR on any failure.
+#
+# Parameters:
+#   $ctx : Full TAF runtime context. All required state is extracted from
+#          $ctx->{options}. No additional arguments are accepted.
+#
+# Required ctx->{options} fields:
+#   database_restore_image_dir : Root directory for the restore image.
+#   db_data_dir                : Database data directory to snapshot.
+#   db_trans_logs_dir          : Optional transaction logs directory.
+#   debug                      : Debug flag passed to CopyRecursive.
+#
+# Returns:
+#   OK    : Restore image successfully created.
+#   ERROR : Any mkdir or copy failure.
+#
+# Notes:
+#   - This subroutine must only be called by _CreateRestoreImage, which is
+#     responsible for stopping the database and cleaning the restore root.
+#   - This implementation is deterministic and contributor-proof. No hidden
+#     behavior, no guessing, no external state.
+################################################################################
+sub CreateRestoreImage_Copy {
+    my ($ctx) = @_;
+
+    my $ops         = $ctx->{options};
+    my $restore_dir = $ops->{database_restore_image_dir};
+    my $datadir     = $ops->{db_data_dir};
+    my $transdir    = $ops->{db_trans_logs_dir};
+    my $DEBUG       = $ops->{debug};
+
+    # Create subdir for data (only if missing)
+    if (! -d "$restore_dir/data") {
+        if (! mkdir "$restore_dir/data") {
+            PrintError("mkdir failed: $restore_dir/data");
+            return ERROR;
+        }
+    }
+
+    # Create subdir for trans logs if defined (only if missing)
+    if (defined $transdir) {
+        if (! -d "$restore_dir/trans_logs") {
+            if (! mkdir "$restore_dir/trans_logs") {
+                PrintError("mkdir failed: $restore_dir/trans_logs");
+                return ERROR;
+            }
+        }
+    }
+
+    # Copy data directory
+    PrintVerbose("Copying datadir into restore image");
+    if (toolsLib::CopyDirContents($datadir, "$restore_dir/data", $DEBUG) != 0) {
+        PrintError("Failed to copy datadir");
+        return ERROR;
+    }
+
+    # Copy trans logs directory if defined
+    if (defined $transdir) {
+        PrintVerbose("Copying trans logs into restore image");
+        if (toolsLib::CopyDirContents($transdir, "$restore_dir/trans_logs", $DEBUG) != 0) {
+            PrintError("Failed to copy trans logs dir");
+            return ERROR;
+        }
+    }
+
+    return OK;
+}
+
+################################################################################
+# CreateRestoreImage_Tar
+#
+# Purpose:
+#   Create a restore image using the "tar" format. This method produces an
+#   uncompressed tar archive containing the database data directory and, if
+#   defined, the transaction logs directory.
+#
+# Behavior:
+#   - Extracts all required paths from $ctx->{options}.
+#   - Assumes the restore image root directory already exists and has been
+#     cleaned by the caller (keep_root => 1).
+#   - Creates a single tar archive:
+#         <restore_dir>/restore_image.tar
+#   - Uses tar -cf with -C to include directory contents without embedding
+#     absolute paths.
+#   - Returns OK on success, ERROR on any failure.
+#
+# Parameters:
+#   $ctx : Full TAF runtime context. All required state is extracted from
+#          $ctx->{options}. No additional arguments are accepted.
+#
+# Required ctx->{options} fields:
+#   database_restore_image_dir : Root directory for the restore image.
+#   db_data_dir                : Database data directory to snapshot.
+#   db_trans_logs_dir          : Optional transaction logs directory.
+#
+# Returns:
+#   OK    : Restore image successfully created.
+#   ERROR : Any tar command failure.
+#
+# Notes:
+#   - This subroutine must only be called by _CreateRestoreImage, which is
+#     responsible for stopping the database and cleaning the restore root.
+#   - This implementation is deterministic and contributor-proof. No hidden
+#     behavior, no guessing, no external state.
+################################################################################
+sub CreateRestoreImage_Tar {
+    my ($ctx) = @_;
+
+    my $ops         = $ctx->{options};
+    my $restore_dir = $ops->{database_restore_image_dir};
+    my $datadir     = $ops->{db_data_dir};
+    my $transdir    = $ops->{db_trans_logs_dir};
+
+    my $tarfile = "$restore_dir/restore_image.tar";
+    PrintVerbose("Creating tar restore image: $tarfile");
+
+    # Build tar parts using -C to avoid absolute paths
+    my @parts;
+    push @parts, "-C $datadir .";
+
+    if (defined $transdir) {
+        push @parts, "-C $transdir .";
+    }
+
+    my $cmd = "tar -cf $tarfile " . join(" ", @parts);
+
+    if (system($cmd) != 0) {
+        PrintError("Failed to create tar restore image");
+        return ERROR;
+    }
+
+    return OK;
+}
+
+################################################################################
+# CreateRestoreImage_TarGz
+#
+# Purpose:
+#   Create a restore image using the "tar.gz" format. This method produces a
+#   gzip-compressed tar archive containing the database data directory and,
+#   if defined, the transaction logs directory.
+#
+# Behavior:
+#   - Extracts all required paths from $ctx->{options}.
+#   - Assumes the restore image root directory already exists and has been
+#     cleaned by the caller (keep_root => 1).
+#   - Creates a single compressed archive:
+#         <restore_dir>/restore_image.tar.gz
+#   - Uses tar -czf with -C to include directory contents without embedding
+#     absolute paths.
+#   - Returns OK on success, ERROR on any failure.
+#
+# Parameters:
+#   $ctx : Full TAF runtime context. All required state is extracted from
+#          $ctx->{options}. No additional arguments are accepted.
+#
+# Required ctx->{options} fields:
+#   database_restore_image_dir : Root directory for the restore image.
+#   db_data_dir                : Database data directory to snapshot.
+#   db_trans_logs_dir          : Optional transaction logs directory.
+#
+# Returns:
+#   OK    : Restore image successfully created.
+#   ERROR : Any tar or gzip command failure.
+#
+# Notes:
+#   - This subroutine must only be called by _CreateRestoreImage, which is
+#     responsible for stopping the database and cleaning the restore root.
+#   - This implementation is deterministic and contributor-proof. No hidden
+#     behavior, no guessing, no external state.
+################################################################################
+sub CreateRestoreImage_TarGz {
+    my ($ctx) = @_;
+
+    my $ops         = $ctx->{options};
+    my $restore_dir = $ops->{database_restore_image_dir};
+    my $datadir     = $ops->{db_data_dir};
+    my $transdir    = $ops->{db_trans_logs_dir};
+
+    my $tarfile = "$restore_dir/restore_image.tar.gz";
+    PrintVerbose("Creating tar.gz restore image: $tarfile");
+
+    # Build tar parts using -C to avoid absolute paths
+    my @parts;
+    push @parts, "-C $datadir .";
+
+    if (defined $transdir) {
+        push @parts, "-C $transdir .";
+    }
+
+    my $cmd = "tar -czf $tarfile " . join(" ", @parts);
+
+    if (system($cmd) != 0) {
+        PrintError("Failed to create tar.gz restore image");
+        return ERROR;
+    }
+
+    return OK;
+}
+
+################################################################################
+# _RestoreImage
+#
+# Purpose:
+#   Top-level restore entry point. This routine performs the lifecycle
+#   management required to restore the database from a previously created
+#   restore image:
+#       - stop the backend
+#       - clean the live database directories
+#       - dispatch to the format-specific restore routine
+#       - restart the backend
+#       - reset warmup state
+#
+# Behavior:
+#   - Extracts all required paths and flags from $ctx->{options}.
+#   - Stops the database backend before restoring.
+#   - Removes all contents of db_data_dir (keep_root => 1).
+#   - Removes all contents of db_trans_logs_dir if defined (keep_root => 1).
+#   - Dispatches to one of:
+#         RestoreImage_Copy
+#         RestoreImage_Tar
+#         RestoreImage_TarGz
+#   - Restarts the backend after restore.
+#   - Marks warmup_run_done = FALSE.
+#
+# Parameters:
+#   $ctx : Full TAF runtime context. All required state is extracted from
+#          $ctx->{options}. No additional arguments are accepted.
+#
+# Returns:
+#   OK    : Restore completed successfully.
+#   ERROR : Any failure in backend stop/start, directory cleaning, or
+#           format-specific restore.
+#
+# Notes:
+#   - This routine performs lifecycle control only. All format-specific work
+#     is delegated to the RestoreImage_* subs.
+#   - Deterministic and contributor-proof. No hidden behavior.
+################################################################################
+sub _RestoreImage {
+    my ($ctx) = @_;
+    my $cri = StageStart(TAF_RUN."_RestoreImage");
+
+    my $state = $ctx->{state};
+    my $ops   = $ctx->{options};
+
+    my $fmt        = lc($ops->{restore_image_format});
+    my $datadir    = $ops->{db_data_dir};
+    my $transdir   = $ops->{db_trans_logs_dir};
+
+    #
+    # Stop backend before restore
+    #
+    if (TAF::Database::DbStop($ctx) != OK) {
+        PrintError("DbStop failed during restore");
+        return ERROR;
+    }
+
+    #
+    # Clean live data directory
+    #
+    eval {
+        require File::Path;
+        File::Path::remove_tree($datadir, { keep_root => 1 });
+    };
+    if ($@) {
+        PrintError("Failed to clean datadir: $datadir");
+        return ERROR;
+    }
+
+    #
+    # Clean live trans logs directory if defined
+    #
+    if (defined $transdir) {
+        eval {
+            require File::Path;
+            File::Path::remove_tree($transdir, { keep_root => 1 });
+        };
+        if ($@) {
+            PrintError("Failed to clean trans logs dir: $transdir");
+            return ERROR;
+        }
+    }
+
+    #
+    # Dispatch to format-specific restore implementation
+    #
+    my $rc;
+
+    if ($fmt eq 'copy') {
+        $rc = RestoreImage_Copy($ctx);
+    }
+    elsif ($fmt eq 'tar') {
+        $rc = RestoreImage_Tar($ctx);
+    }
+    elsif ($fmt eq 'tar.gz') {
+        $rc = RestoreImage_TarGz($ctx);
+    }
+    else {
+        PrintError("Unknown restore_image_format: $fmt");
+        return ERROR;
+    }
+
+    if ($rc != OK) {
+        PrintError("Restore failed for format: $fmt");
+        return ERROR;
+    }
+
+    #
+    # Start backend after restore
+    #
+    if (TAF::Database::DbStart($ctx) != OK) {
+        PrintError("DbStart failed after restore");
+        return ERROR;
+    }
+
+    #
+    # Reset warmup state
+    #
+    $state->{warmup_run_done} = FALSE;
+
+    StageEnd($cri);
+    return OK;
+}
+
+################################################################################
+# RestoreImage_Copy
+#
+# Purpose:
+#   Restore the database data directory (and optional transaction logs
+#   directory) from a previously created "copy" restore image. This method
+#   performs a metadata-preserving directory copy from the restore image
+#   back into the live database directories.
+#
+# Behavior:
+#   - Extracts all required paths from $ctx->{options}.
+#   - Assumes the database backend has already been stopped by the caller.
+#   - Assumes the live db_data_dir and db_trans_logs_dir (if defined) have
+#     already been cleaned by _RestoreImage.
+#   - Copies:
+#         <restore_dir>/data       -> db_data_dir
+#         <restore_dir>/trans_logs -> db_trans_logs_dir (if defined)
+#   - Returns OK on success, ERROR on any failure.
+#
+# Parameters:
+#   $ctx : Full TAF runtime context. All required state is extracted from
+#          $ctx->{options}. No additional arguments are accepted.
+#
+# Required ctx->{options} fields:
+#   database_restore_image_dir : Root directory containing the restore image.
+#   db_data_dir                : Live database data directory.
+#   db_trans_logs_dir          : Optional live transaction logs directory.
+#   debug                      : Debug flag passed to CopyRecursive.
+#
+# Notes:
+#   - This routine does not stop or start the backend.
+#   - This routine does not clean the live directories. That lifecycle is
+#     handled by _RestoreImage.
+#   - Deterministic and contributor-proof. No hidden behavior.
+################################################################################
+sub RestoreImage_Copy {
+    my ($ctx) = @_;
+
+    my $ops          = $ctx->{options};
+    my $restore_dir  = $ops->{database_restore_image_dir};
+    my $datadir      = $ops->{db_data_dir};
+    my $transdir     = $ops->{db_trans_logs_dir};
+    my $DEBUG        = $ops->{debug};
+
+    # Copy data directory back
+    PrintVerbose("Restoring datadir from restore image");
+    if (toolsLib::CopyDirContents("$restore_dir/data", $datadir, $DEBUG) != 0) {
+        PrintError("Failed to restore datadir");
+        return ERROR;
+    }
+
+    # Copy trans logs directory back if defined
+    if (defined $transdir) {
+        PrintVerbose("Restoring trans logs from restore image");
+        if (toolsLib::CopyDirContents("$restore_dir/trans_logs", $transdir, $DEBUG) != 0) {
+            PrintError("Failed to restore trans logs dir");
+            return ERROR;
+        }
+    }
+
+    return OK;
+}
+
+################################################################################
+# RestoreImage_Tar
+#
+# Purpose:
+#   Restore the database data directory (and optional transaction logs
+#   directory) from a previously created "tar" restore image. This method
+#   extracts an uncompressed tar archive into the live database directories.
+#
+# Behavior:
+#   - Extracts all required paths from $ctx->{options}.
+#   - Assumes the database backend has already been stopped by the caller.
+#   - Assumes the live db_data_dir and db_trans_logs_dir (if defined) have
+#     already been cleaned by _RestoreImage.
+#   - Extracts:
+#         <restore_dir>/restore_image.tar
+#     into:
+#         db_data_dir
+#     and, if present in the archive, into:
+#         db_trans_logs_dir
+#   - Returns OK on success, ERROR on any failure.
+#
+# Parameters:
+#   $ctx : Full TAF runtime context. All required state is extracted from
+#          $ctx->{options}. No additional arguments are accepted.
+#
+# Required ctx->{options} fields:
+#   database_restore_image_dir : Root directory containing the restore image.
+#   db_data_dir                : Live database data directory.
+#   db_trans_logs_dir          : Optional live transaction logs directory.
+#
+# Notes:
+#   - This routine does not stop or start the backend.
+#   - This routine does not clean the live directories. That lifecycle is
+#     handled by _RestoreImage.
+#   - Deterministic and contributor-proof. No hidden behavior.
+################################################################################
+sub RestoreImage_Tar {
+    my ($ctx) = @_;
+
+    my $ops          = $ctx->{options};
+    my $restore_dir  = $ops->{database_restore_image_dir};
+    my $datadir      = $ops->{db_data_dir};
+    my $transdir     = $ops->{db_trans_logs_dir};
+
+    my $tarfile = "$restore_dir/restore_image.tar";
+
+    PrintVerbose("Restoring from tar image: $tarfile");
+
+    #
+    # Extract into data directory
+    #
+    my $cmd = "tar -xf $tarfile -C $datadir";
+
+    if (system($cmd) != 0) {
+        PrintError("Failed to extract tar restore image into datadir");
+        return ERROR;
+    }
+
+    #
+    # If trans logs directory exists in the archive, extract into it
+    #
+    if (defined $transdir) {
+        my $cmd2 = "tar -xf $tarfile -C $transdir";
+
+        if (system($cmd2) != 0) {
+            PrintError("Failed to extract tar restore image into trans logs dir");
+            return ERROR;
+        }
+    }
+
+    return OK;
+}
+
+################################################################################
+# RestoreImage_TarGz
+#
+# Purpose:
+#   Restore the database data directory (and optional transaction logs
+#   directory) from a previously created "tar.gz" restore image. This method
+#   extracts a gzip-compressed tar archive into the live database directories.
+#
+# Behavior:
+#   - Extracts all required paths from $ctx->{options}.
+#   - Assumes the database backend has already been stopped by the caller.
+#   - Assumes the live db_data_dir and db_trans_logs_dir (if defined) have
+#     already been cleaned by _RestoreImage.
+#   - Extracts:
+#         <restore_dir>/restore_image.tar.gz
+#     into:
+#         db_data_dir
+#     and, if present in the archive, into:
+#         db_trans_logs_dir
+#   - Returns OK on success, ERROR on any failure.
+#
+# Parameters:
+#   $ctx : Full TAF runtime context. All required state is extracted from
+#          $ctx->{options}. No additional arguments are accepted.
+#
+# Required ctx->{options} fields:
+#   database_restore_image_dir : Root directory containing the restore image.
+#   db_data_dir                : Live database data directory.
+#   db_trans_logs_dir          : Optional live transaction logs directory.
+#
+# Notes:
+#   - This routine does not stop or start the backend.
+#   - This routine does not clean the live directories. That lifecycle is
+#     handled by _RestoreImage.
+#   - Deterministic and contributor-proof. No hidden behavior.
+################################################################################
+sub RestoreImage_TarGz {
+    my ($ctx) = @_;
+
+    my $ops          = $ctx->{options};
+    my $restore_dir  = $ops->{database_restore_image_dir};
+    my $datadir      = $ops->{db_data_dir};
+    my $transdir     = $ops->{db_trans_logs_dir};
+
+    my $tarfile = "$restore_dir/restore_image.tar.gz";
+
+    PrintVerbose("Restoring from tar.gz image: $tarfile");
+
+    #
+    # Extract into data directory
+    #
+    my $cmd = "tar -xzf $tarfile -C $datadir";
+
+    if (system($cmd) != 0) {
+        PrintError("Failed to extract tar.gz restore image into datadir");
+        return ERROR;
+    }
+
+    #
+    # If trans logs directory exists in the archive, extract into it
+    #
+    if (defined $transdir) {
+        my $cmd2 = "tar -xzf $tarfile -C $transdir";
+
+        if (system($cmd2) != 0) {
+            PrintError("Failed to extract tar.gz restore image into trans logs dir");
+            return ERROR;
+        }
+    }
+
+    return OK;
+}
+
+################################################################################
 # Module terminator
-#############################################################################
+################################################################################
 1;

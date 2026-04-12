@@ -3,10 +3,23 @@ package TAF::Utilities;
 # TAF::Utilities
 #
 # Created: December 2025
-# Last Modified: January 2026
+# Last Modified: March 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -66,7 +79,7 @@ package TAF::Utilities;
 #       install-type inference pipeline and must remain stable unless
 #       coordinated with DatabaseSoftwareInstalls.
 #############################################################################
-our $VERSION = '2.0';
+our $VERSION = '2.5';
 #===============================================================================
 #                            Imports
 #===============================================================================
@@ -125,6 +138,7 @@ our @EXPORT = qw(
     ConfirmDestructiveAction
     EnsureFrameworkSubDirs
     EnsureTrailingPm
+    ExecuteOsScript
     GetHostName
     GetValidSubdirs
     HandleDirectoryMaintenance
@@ -242,6 +256,7 @@ our @initOptDirs =
 (
     "archive_path",
     "db_data_dir",
+    "database_restore_image_dir",
     "db_software_install_root_dir",
     "db_trans_logs_dir",
     "logs_dir",
@@ -1564,8 +1579,10 @@ sub SetupVariables {
     $options_ref->{results_root_dir}  //= $dirs_ref->{working} . "results/";
     $options_ref->{tmp_dir}           //= $dirs_ref->{working} . "tmp/";
     $options_ref->{db_data_dir}       //= $dirs_ref->{working} . "data/";
+    $options_ref->{database_restore_image_dir}
+                                      //= $dirs_ref->{working} . "db_image/";
     $options_ref->{db_software_install_root_dir}
-        //= $dirs_ref->{working} . "database_software_installs/";
+                    //= $dirs_ref->{working} . "database_software_installs/";
 
     # Credentials and runtime defaults
     $options_ref->{pass}       //= "not_defined_please_set_user_password";
@@ -1711,6 +1728,128 @@ sub EnvironmentSetup  {
 
     # Walk the framework directory keys and ensure each target directory exists.
     return ERROR if EnsureFrameworkSubDirs($ctx->{options}, $verbose) != OK;
+
+    return OK;
+}
+
+#===============================================================================
+# ExecuteOsScript
+#
+# PURPOSE:
+#     Validate an OS script path, ensure the log directory is valid, execute the
+#     script with any provided arguments, and record all output to a log file.
+#
+# PARAMETERS:
+#     $ctx
+#         Framework context object containing date utilities and messaging.
+#
+#     $label
+#         Logical label used for log file naming and status messages.
+#
+#     $script
+#         Script path plus optional arguments. The first token must be an
+#         existing, regular, executable file.
+#
+#     $logDir
+#         Directory where the log file (<label>.log) will be written.
+#
+# BEHAVIOR:
+#     - Extract the script path (first token) and validate:
+#           * Must exist
+#           * Must be a regular file
+#           * Must be executable
+#     - Validate that logDir exists and is a directory.
+#     - Construct the log file path without creating subdirectories.
+#     - Write start timestamp and script details to the log.
+#     - Execute the script, redirecting stdout/stderr to the log file.
+#     - Write end timestamp and elapsed seconds.
+#     - Normalize exit code and return OK or ERROR.
+#
+# RETURNS:
+#     OK on success; ERROR on any validation failure or non‑zero script exit.
+#
+# NOTES:
+#     - No lifecycle logging is performed.
+#     - Caller must ensure $logDir is valid and writable.
+#===============================================================================
+sub ExecuteOsScript {
+    my ($ctx, $label, $script, $logDir) = @_;
+
+    my $u    = StageStart("ExecuteOsScript");
+    my $date = $ctx->{obj}{date};
+
+    # Strip surrounding quotes if present
+    $script =~ s/^"//;
+    $script =~ s/"$//;
+
+    # Split into script path + arguments
+    my ($scriptPath, $rest) = split(/\s+/, $script, 2);
+
+    # Validate script path
+    if (!defined $scriptPath || $scriptPath eq "") {
+        PrintError($u."No script path provided for ".$label);
+        return ERROR;
+    }
+    if (! -e $scriptPath) {
+        PrintError($u."Script not found: ".$scriptPath);
+        return ERROR;
+    }
+    if (! -f $scriptPath) {
+        PrintError($u."Not a regular file: ".$scriptPath);
+        return ERROR;
+    }
+    if (! -x $scriptPath) {
+        PrintError($u."Script is not executable: ".$scriptPath);
+        return ERROR;
+    }
+
+    # Validate log directory
+    if (!defined $logDir || $logDir eq "" || ! -d $logDir) {
+        PrintError($u."Invalid log directory: ".$logDir);
+        return ERROR;
+    }
+
+    # Log file path
+    my $logFile = TrailingSlash($logDir).$label.".log";
+
+    PrintVerbose($u."Executing OS script for ".$label);
+    PrintVerbose($u."Script: ".$script);
+    PrintVerbose($u."Output: ".$logFile);
+
+    # Open log file and write header
+    my $fh;
+    if (!open($fh, ">", $logFile)) {
+        PrintError($u."Unable to open log file: ".$logFile);
+        return ERROR;
+    }
+
+    my $start = $date->GetStartTime();
+    print $fh "== ExecuteOsScript: ".$label." ==\n";
+    print $fh "Script: ".$script."\n";
+    print $fh "Start: ".$date->GetDateTime()."\n\n";
+    close($fh);  # flush header
+
+    # Run script and append output
+    my $cmd = $script." >>".$logFile." 2>&1";
+    my $rc  = system($cmd);
+
+    # Append footer
+    if (!open($fh, ">>", $logFile)) {
+        PrintError($u."Unable to append to log file: ".$logFile);
+        return ERROR;
+    }
+
+    my $elapsed = $date->FigureElapsedTimeSeconds($start);
+    print $fh "\nEnd: ".$date->GetDateTime()."\n";
+    print $fh "Elapsed seconds: ".$elapsed."\n";
+    close($fh);
+
+    if ($rc != 0) {
+        PrintError($u.$label." failed with exit code ".$rc);
+        return ERROR;
+    }
+
+    PrintVerbose($u.$label." completed successfully in ".$elapsed." seconds");
 
     return OK;
 }

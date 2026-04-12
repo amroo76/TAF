@@ -21,13 +21,28 @@ package Switch;
 #     Framework. These additions do not alter upstream behavior or licensing.
 #
 # Copyright:
-#     Original upstream copyright:
-#         See the Switch module documentation and Perl core distribution.
+#  Original upstream copyright:
+#   Licensed under the same terms as Perl itself.
+#   See the Switch module documentation and Perl core distribution.
 #
-#     TAF integration and header additions:
-#         Copyright (c) 2025-2026 MariaDB Foundation
+#TAF integration and header additions:
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
 #
-# Licensed under the same terms as Perl itself.
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
+#
+# Licensed under the GNU General Public License, version 2 or later (GPLv2+).
+# See https://www.gnu.org/licenses/ for details.
 #
 # PURPOSE:
 #     Provide a generalized switch/case control structure for Perl. This module

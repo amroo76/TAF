@@ -3,10 +3,23 @@ package TAF::CommandLine;
 # TAF::CommandLine
 #
 # Created: December 2025
-# Last Modified: January 2026
+# Last Modified: March 2026
 #
 # This file is part of the Test Automation Framework (TAF).
-# # Copyright (c) 2025-2026 MariaDB Foundation
+# Copyright (c) 2025-2026 MariaDB Foundation and Jonathan "jeb" Miller
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; version 2 or later of the License.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335 
 #
 # Licensed under the GNU General Public License, version 2 or later (GPLv2+).
 # See https://www.gnu.org/licenses/ for details.
@@ -61,6 +74,8 @@ BEGIN {
 
 use TAF::Utilities;
 require toolsLib;
+
+our $VERSION = '2.5';
 
 #===============================================================================
 #                          Exported functions
@@ -139,20 +154,25 @@ sub ParseCommandLineOptions {
         #-----------------------------------------------------------------------
         # Core: High-level TAF execution controls
         #-----------------------------------------------------------------------
-        "action:s"                    => \$tmp_ref->{action},
-        "comments:s"                  => \$tmp_ref->{comments},
-        "duration:s"                  => \$tmp_ref->{duration},
-        "environment-variables:s"     => \$tmp_ref->{environment_variables},
-        "exit-if-test-lock-exists"    => \$tmp_ref->{exit_if_test_lock_exists},
-        "ignore-running-db-process"   => \$tmp_ref->{ignore_running_db_process},
-        "host:s"                      => \$tmp_ref->{host},
-        "instances:i"                 => \$tmp_ref->{instances},
-        "iterations:i"                => \$tmp_ref->{iterations},
-        "threads:s"                   => \$tmp_ref->{threads},
-        "tests:s"                     => \$tmp_ref->{tests},
-        "test-type:s"                 => \$tmp_ref->{test_type},
-        "use-request-based"           => \$tmp_ref->{use_request_based},
-        "verbose"                     => \$tmp_ref->{verbose},
+        "action:s"                      => \$tmp_ref->{action},
+        "comments:s"                    => \$tmp_ref->{comments},
+        "duration:s"                    => \$tmp_ref->{duration},
+        "database-iteration-mode:s"     => \$tmp_ref->{database_iteration_mode},
+        "database-restore-image-dir:s"  => \$tmp_ref->{database_restore_image_dir},
+        "environment-variables:s"       => \$tmp_ref->{environment_variables},
+        "exit-if-test-lock-exists"      => \$tmp_ref->{exit_if_test_lock_exists},
+        "ignore-running-db-process"     => \$tmp_ref->{ignore_running_db_process},
+        "host:s"                        => \$tmp_ref->{host},
+        "include-warmup-iteration"      => \$tmp_ref->{include_warmup_iteration},
+        "instances:i"                   => \$tmp_ref->{instances},
+        "iterations:i"                  => \$tmp_ref->{iterations},
+        "restore-image-format"          => \$tmp_ref->{restore_image_format},
+        "threads:s"                     => \$tmp_ref->{threads},
+        "tests:s"                       => \$tmp_ref->{tests},
+        "test-setup-mode:s"             => \$tmp_ref->{test_setup_mode},
+        "test-type:s"                   => \$tmp_ref->{test_type},
+        "use-request-based"             => \$tmp_ref->{use_request_based},
+        "verbose"                       => \$tmp_ref->{verbose},
 
         #-----------------------------------------------------------------------
         # Core: Paths, directories, and file locations
@@ -195,6 +215,12 @@ sub ParseCommandLineOptions {
         "db-trans-logs-dir:s"         => \$tmp_ref->{db_trans_logs_dir},
 
         #-----------------------------------------------------------------------
+        # DB Process Start/Stop wait times
+        #-----------------------------------------------------------------------
+        "db-start-wait"               => \$tmp_ref->{db_start_wait},
+        "db-stop-wait"                => \$tmp_ref->{db_stop_wait},
+
+        #-----------------------------------------------------------------------
         # DB Process Rest Watch
         #-----------------------------------------------------------------------
         "db-process-rest-enable"        => \$tmp_ref->{db_process_rest_enable},
@@ -224,6 +250,14 @@ sub ParseCommandLineOptions {
         "db-ssl-cipher:s"            => \$tmp_ref->{db_ssl_cipher},
 
         #-----------------------------------------------------------------------
+        # Core: Script execution hooks
+        #-----------------------------------------------------------------------
+        "exec-script-file-before-db-start:s" => \$tmp_ref->{exec_script_file_before_db_start},
+        "exec-script-file-after-db-start:s"  => \$tmp_ref->{exec_script_file_after_db_start},
+        "exec-script-file-before-run-iter:s" => \$tmp_ref->{exec_script_file_before_run_iter},
+        "exec-script-file-after-run-iter:s"  => \$tmp_ref->{exec_script_file_after_run_iter},
+
+        #-----------------------------------------------------------------------
         # Core: SQL execution hooks
         #-----------------------------------------------------------------------
         "exec-sql-file-before-test-setup:s" => \$tmp_ref->{exec_sql_file_before_test_setup},
@@ -232,11 +266,23 @@ sub ParseCommandLineOptions {
         "exec-sql-file-after-run-iter:s"    => \$tmp_ref->{exec_sql_file_after_run_iter},
 
         #-----------------------------------------------------------------------
+        # Profiling
+        #-----------------------------------------------------------------------
+        "profiler-enabled"             => \$tmp_ref->{profiler_enabled},
+        "profiler-lib:s"               => \$tmp_ref->{profiler_lib},
+        "profiler-duration:i"          => \$tmp_ref->{profiler_duration},
+        "profiler-start-delay:i"       => \$tmp_ref->{profiler_start_delay},
+        "profiler-ts-duration-unit:s"  => \$tmp_ref->{profiler_ts_duration_unit},
+        "profiler-continuous"          => \$tmp_ref->{profiler_continuous},
+        "profiler-opts:s"              => \$tmp_ref->{profiler_opts},
+        "profiler-generate-report"     => \$tmp_ref->{profiler_generate_report},
+        "profiler-generate-flamegraph" => \$tmp_ref->{profiler_generate_flamegraph},
+
+        #-----------------------------------------------------------------------
         # Core: Build / setup configuration
         #-----------------------------------------------------------------------
         "cmake-path:s"                => \$tmp_ref->{cmake_path},
         "skip-client-builds"          => \$tmp_ref->{skip_client_builds},
-        "do-test-setup-every-test"    => \$tmp_ref->{do_test_setup_every_test},
 
         #-----------------------------------------------------------------------
         # Core: Test suite configuration
@@ -265,7 +311,6 @@ sub ParseCommandLineOptions {
         "skip-database-shutdown"      => \$tmp_ref->{skip_database_shutdown},
         "skip-test-cleanup"           => \$tmp_ref->{skip_test_cleanup},
         "skip-test-post"              => \$tmp_ref->{skip_test_post},
-        "skip-test-setup"             => \$tmp_ref->{skip_test_setup},
         "skip-test-suite-cleanup"     => \$tmp_ref->{skip_test_suite_cleanup},
 
         #-----------------------------------------------------------------------
