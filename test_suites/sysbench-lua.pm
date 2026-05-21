@@ -2511,7 +2511,7 @@ sub SetConnectionArgs {
         }
 
         $args .= " --thread-init-timeout=" . $tsOpt{thread_init_timeout};
-        $args .= " --mysql-ssl" if defined $tsOpt{bmk_mysql_ssl};
+        $args .= " --mysql-ssl=" .$tsOpt{bmk_mysql_ssl} if defined $tsOpt{bmk_mysql_ssl};
 
         $args .= " --sync-file='" . $tsOpt{bmk_sync_file} . "'" if defined $tsOpt{bmk_sync_file};
         $args .= " --sync-wait=" . $tsOpt{bmk_sync_file_wait_timeout_ms} if defined $tsOpt{bmk_sync_file_wait_timeout_ms};
